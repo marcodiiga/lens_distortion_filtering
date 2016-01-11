@@ -1,7 +1,7 @@
 <html>
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-  <title>Lens distortion filtering</title>
+  <title>Radial lens undistortion filter</title>
   <script type="text/javascript" src="utils/glMatrix-0.9.5.min.js"></script>
   <script type="text/javascript" src="utils/webgl-utils.js"></script>
   <script type="text/javascript" src="utils/webgl-debug.js"></script>
@@ -313,7 +313,7 @@
     <div style="float: left;">
       <canvas id="filter-canvas" style="border: none;" width="500" height="500"></canvas>
     </div>
-    <div style="display: inline-block; padding: 10px;">
+    <div style="float: left; padding: 10px;">
       <input type="checkbox" onchange="same_alpha_factors = this.checked;" checked/>Force square pixels<br/><br/>
       Adjust horizontal distortion parameter<br/>
       <input id="alphax_slider" type="range" style="vertical-align:middle;" min="0" max="100" value="0" onchange="adjustAlphaFactor('x', this.value)"
@@ -323,6 +323,10 @@
       <input id="alphay_slider" type="range" style="vertical-align:middle;" min="0" max="100" value="0" onchange="adjustAlphaFactor('y', this.value)"
       oninput="adjustAlphaFactor('y', this.value)"/>
       <input type="text" id="alphay_value" style="vertical-align:middle; width: 50px; text-align: center;" value="0.0" readonly><br/>
+      <div style="float: left; padding: 20px">
+          <img style="vertical-align:middle;" src="http://marcodiiga.github.io/images/webicon-github-m.png"/>
+          <a href="https://github.com/marcodiiga/lens_distortion_filtering">Github Repo</a>
+      </div>
     </div>
   </div>
 </body>
