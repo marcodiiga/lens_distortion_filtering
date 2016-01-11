@@ -10,18 +10,54 @@
     precision mediump float;
     
     uniform sampler2D texture_diffuse;
+    uniform vec2 image_dimensions;
+    
     varying vec4 pass_Color;
     varying vec2 pass_TextureCoord;
 
     void main(void) {
+    
+  #if 1
+    
+      float alphax = 0.1;
+      float alphay = 0.1;
+    
+      // Normalize the u,v coordinates in the range [-1;+1]
+      float x = (2.0 * pass_TextureCoord.x - 1.0) / 1.0;
+      float y = (2.0 * pass_TextureCoord.y - 1.0) / 1.0;
+      
+      // Calculate l2 norm
+      float r = x*x + y*y;
+      
+      // Calculate the deflated or inflated new coordinate (reverse transform)
+      float x3 = x / (1.0 - alphax * r);
+		  float y3 = y / (1.0 - alphay * r); 
+			float x2 = x / (1.0 - alphax * (x3*x3 + y3*y3));
+			float y2 = y / (1.0 - alphay * (x3*x3 + y3*y3));	
+      
+      // Forward transform
+      // float x2 = x * (1.0 - alphax * r);
+      // float y2 = y * (1.0 - alphay * r);
+
+      // De-normalize to the original range
+      float i2 = (x2 + 1.0) * 1.0 / 2.0;
+      float j2 = (y2 + 1.0) * 1.0 / 2.0;
+    
+      if(i2 >= 0.0 && i2 <= 1.0 && j2 >= 0.0 && j2 <= 1.0)
+        gl_FragColor = texture2D(texture_diffuse, vec2(i2, j2));
+      else
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      
+  #else
       gl_FragColor = texture2D(texture_diffuse, pass_TextureCoord);
+  #endif
     }
   </script>
 
   <script id="shader-vs" type="x-shader/x-vertex">
     attribute vec4 in_Position;
     attribute vec4 in_Color;
-    attribute vec2 in_TextureCoord;
+    attribute vec2 in_TextureCoord;    
     
     uniform mat4 uMVMatrix;
     uniform mat4 uPMatrix;
@@ -65,10 +101,11 @@
     var vboiId; // Quad indices
     var indices_count;
     var textureId;
+    var imageDimensions = [0.0, 0.0];
     var shaderProgram;
     var textureIsSafeToRender = false;
     var mvMatrix = mat4.create(); // Warning: does not default to identity
-    var pMatrix = mat4.create();  // Warning: does not default to identity
+    var pMatrix = mat4.create();  // Warning: does not default to identity    
     
     function getShader(gl, id) {
       var shaderScript = document.getElementById(id);
@@ -133,11 +170,14 @@
       // Bind uniforms for matrices
       ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix"));
+      
+      // Bind uniform for image dimensions
+      ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.imageDimensionsUniform = gl.getUniformLocation(shaderProgram, "image_dimensions"));      
     }
     
     function setupQuad() {
       // Set up VBO with quad data
-      ctx = WebGLDebugUtils.makeDebugContext(vboId = gl.createBuffer());      
+      ctx = WebGLDebugUtils.makeDebugContext(vboId = gl.createBuffer());
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
       var vbo_data = [
         -0.5, 0.5, 0.0, 1.0,    // Vertex (xyzw)
@@ -180,7 +220,9 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }
+      
       textureId.image.src = "assets/pincushion_distortion.png";
+      imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
     }
     
     function drawScene() {
@@ -198,6 +240,9 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix));
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix));
       
+      // Set image dimensions uniform
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(shaderProgram.imageDimensionsUniform, imageDimensions));
+      
       // Bind texture to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId));
@@ -212,6 +257,11 @@
       
       // Bind vertex index info
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+      
+      // ------------ Filtering-specific data ------------
+      
+      // Bind
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(shaderProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
       
       // Draw the quad
       ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
