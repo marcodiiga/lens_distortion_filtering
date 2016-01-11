@@ -11,16 +11,13 @@
     
     uniform sampler2D texture_diffuse;
     uniform vec2 image_dimensions;
+    uniform float alphax;
+    uniform float alphay;
     
     varying vec4 pass_Color;
     varying vec2 pass_TextureCoord;
 
     void main(void) {
-    
-  #if 1
-    
-      float alphax = 0.1;
-      float alphay = 0.1;
     
       // Normalize the u,v coordinates in the range [-1;+1]
       float x = (2.0 * pass_TextureCoord.x - 1.0) / 1.0;
@@ -47,10 +44,6 @@
         gl_FragColor = texture2D(texture_diffuse, vec2(i2, j2));
       else
         gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-      
-  #else
-      gl_FragColor = texture2D(texture_diffuse, pass_TextureCoord);
-  #endif
     }
   </script>
 
@@ -102,6 +95,9 @@
     var indices_count;
     var textureId;
     var imageDimensions = [0.0, 0.0];
+    var alphax = 0.0;
+    var alphay = 0.0;
+    var maximum_alpha = 0.25;
     var shaderProgram;
     var textureIsSafeToRender = false;
     var mvMatrix = mat4.create(); // Warning: does not default to identity
@@ -171,8 +167,10 @@
       ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix"));
       
-      // Bind uniform for image dimensions
-      ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.imageDimensionsUniform = gl.getUniformLocation(shaderProgram, "image_dimensions"));      
+      // Bind uniform for image dimensions and alpha factors
+      ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.imageDimensionsUniform = gl.getUniformLocation(shaderProgram, "image_dimensions"));
+      ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.alphax = gl.getUniformLocation(shaderProgram, "alphax"));
+      ctx = WebGLDebugUtils.makeDebugContext(shaderProgram.alphay = gl.getUniformLocation(shaderProgram, "alphay"));
     }
     
     function setupQuad() {
@@ -233,7 +231,6 @@
         return; // Still can't render stuff if the texture hasn't been loaded yet
         
       // Set matrix uniforms
-      // mat4.identity(pMatrix);
       mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 100.0, pMatrix);
       mat4.identity(mvMatrix);
       mat4.translate(mvMatrix, [0.0, 0.0, -1.2]);
@@ -242,6 +239,10 @@
       
       // Set image dimensions uniform
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(shaderProgram.imageDimensionsUniform, imageDimensions));
+      
+      // Set alpha factors uniforms
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1fv(shaderProgram.alphax, new Float32Array([alphax])));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1fv(shaderProgram.alphay, new Float32Array([alphay])));
       
       // Bind texture to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
@@ -276,10 +277,53 @@
       requestAnimFrame(paintLoop);
       drawScene();      
     }
+    
+    // ~-~-~-~-~-~-~-~-~- UI related handling routines ~-~-~-~-~-~-~-~-~-
+    
+    var same_alpha_factors = true; // Whether alphax and alphay are forced to be equal
+    
+    function adjustAlphaFactor(direction, value) { // value should be in range [0;100]
+      switch(direction) {
+        case 'x': {
+          alphax = (value * 0.01) * maximum_alpha;
+          document.getElementById("alphax_value").value = alphax;
+          if(same_alpha_factors) {
+            alphay = alphax;
+            document.getElementById("alphay_slider").value = value;
+            document.getElementById("alphay_value").value = alphay;
+          }
+        } break;
+        case 'y': {
+          alphay = (value * 0.01) * maximum_alpha;
+          document.getElementById("alphay_value").value = alphay;
+          if(same_alpha_factors) {
+            alphax = alphay;
+            document.getElementById("alphax_slider").value = value;
+            document.getElementById("alphax_value").value = alphax;
+          }
+        } break;
+      }
+    }
+    // ~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-
         
   </script>
 </head>
 <body onload="webGLStart();">
-  <canvas id="filter-canvas" style="border: none;" width="500" height="500"></canvas>
+  <div style="padding: 10px;">
+    <div style="float: left;">
+      <canvas id="filter-canvas" style="border: none;" width="500" height="500"></canvas>
+    </div>
+    <div style="display: inline-block; padding: 10px;">
+      <input type="checkbox" onchange="same_alpha_factors = this.checked;" checked/>Force square pixels<br/><br/>
+      Adjust horizontal distortion parameter<br/>
+      <input id="alphax_slider" type="range" style="vertical-align:middle;" min="0" max="100" value="0" onchange="adjustAlphaFactor('x', this.value)"
+       oninput="adjustAlphaFactor('x', this.value)"/>
+      <input type="text" id="alphax_value" style="vertical-align:middle; width: 50px; text-align: center;" value="0.0" readonly><br/>
+      Adjust vertical distortion parameter<br/>
+      <input id="alphay_slider" type="range" style="vertical-align:middle;" min="0" max="100" value="0" onchange="adjustAlphaFactor('y', this.value)"
+      oninput="adjustAlphaFactor('y', this.value)"/>
+      <input type="text" id="alphay_value" style="vertical-align:middle; width: 50px; text-align: center;" value="0.0" readonly><br/>
+    </div>
+  </div>
 </body>
 </html>
