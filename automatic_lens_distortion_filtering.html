@@ -87,10 +87,8 @@
         // on the border of the input image before transferring it to the GPU
 
         float alpha = 1.0;
-        if(isAboutEqual(pass_TextureCoord.x, 0.0) ||
-           isAboutEqual(pass_TextureCoord.y, 0.0) ||
-           isAboutEqual(pass_TextureCoord.x, 1.0) ||
-           isAboutEqual(pass_TextureCoord.y, 1.0))
+        if(isAboutEqual(i2, 0.0) || isAboutEqual(j2, 0.0) ||
+           isAboutEqual(i2, 1.0) || isAboutEqual(j2, 1.0))
           alpha = 0.0;
             
         texture_color.a = alpha;
@@ -160,10 +158,15 @@
         return false;
     }
 
+    // Deals with floating point imprecisions
+    bool isAboutEqual(float v1, float v2) {
+      return abs(v1 - v2) < 0.01;
+    }
+
     // Any computation involving the texture border is unreliable. Check if
     // this point is on a alpha == 0 component and return true if it is
     bool isOnTextureBorder(vec4 texel_color) {
-      if(texel_color.a == 0.0)
+      if(isAboutEqual(texel_color.a, 0.0))
         return true;
       else
         return false;
@@ -198,7 +201,7 @@
           result_r = 0.0;
           result_g = 0.0;
           result_b = 0.0;
-          result_a = 0.0;
+          result_a = 1.0;
           break;
         }
         
@@ -210,14 +213,14 @@
           result_r = 0.0;
           result_g = 0.0;
           result_b = 0.0;
-          result_a = 0.0;
+          result_a = 1.0;
           break;
         }
 
-        result_r += p1_rgba.r - p2_rgba.r;
-        result_g += p1_rgba.g - p2_rgba.g;
-        result_b += p1_rgba.b - p2_rgba.b;
-        result_a += p1_rgba.a - p2_rgba.a;
+        result_r += (p1_rgba.r - p2_rgba.r);
+        result_g += (p1_rgba.g - p2_rgba.g);
+        result_b += (p1_rgba.b - p2_rgba.b);
+        // result_a += (p1_rgba.a - p2_rgba.a);
 
         // << Row 2 >>
 
@@ -229,7 +232,7 @@
           result_r = 0.0;
           result_g = 0.0;
           result_b = 0.0;
-          result_a = 0.0;
+          result_a = 1.0;
           break;
         }
         
@@ -248,7 +251,7 @@
         result_r += 1.5 * (p1_rgba.r - p2_rgba.r);
         result_g += 1.5 * (p1_rgba.g - p2_rgba.g);
         result_b += 1.5 * (p1_rgba.b - p2_rgba.b);
-        result_a += 1.5 * (p1_rgba.a - p2_rgba.a);
+        // result_a += 1.5 * (p1_rgba.a - p2_rgba.a);
 
         // << Row 2 >>
 
@@ -260,7 +263,7 @@
           result_r = 0.0;
           result_g = 0.0;
           result_b = 0.0;
-          result_a = 0.0;
+          result_a = 1.0;
           break;
         }
         
@@ -272,20 +275,20 @@
           result_r = 0.0;
           result_g = 0.0;
           result_b = 0.0;
-          result_a = 0.0;
+          result_a = 1.0;
           break;
         }
 
-        result_r += p1_rgba.r - p2_rgba.r;
-        result_g += p1_rgba.g - p2_rgba.g;
-        result_b += p1_rgba.b - p2_rgba.b;
-        result_a += p1_rgba.a - p2_rgba.a;
+        result_r += (p1_rgba.r - p2_rgba.r);
+        result_g += (p1_rgba.g - p2_rgba.g);
+        result_b += (p1_rgba.b - p2_rgba.b);
+        // result_a += (p1_rgba.a - p2_rgba.a);
         
       }
 
 
       // Sum all responses before thresholding
-      float total_response = result_r + result_g + result_b + result_a;
+      float total_response = result_r + result_g + result_b;
 
       total_response = applyThreshold(total_response, 0.5);
     
