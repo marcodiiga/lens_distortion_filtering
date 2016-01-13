@@ -1,0 +1,653 @@
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>Radial lens undistortion filter</title>
+  <script type="text/javascript" src="utils/glMatrix-0.9.5.min.js"></script>
+  <script type="text/javascript" src="utils/webgl-utils.js"></script>
+  <script type="text/javascript" src="utils/webgl-debug.js"></script>
+
+
+  <script id="debug-fs" type="x-shader/x-fragment">
+    // Debug fs
+    precision mediump float;
+    uniform sampler2D texture_diffuse;
+    varying vec4 pass_Color;
+    varying vec2 pass_TextureCoord;
+
+    void main(void) {
+        gl_FragColor = texture2D(texture_diffuse, pass_TextureCoord);
+    }
+  </script>
+  <script id="debug-vs" type="x-shader/x-vertex">    
+    // Debug vs
+    attribute vec4 in_Position;
+    attribute vec4 in_Color;
+    attribute vec2 in_TextureCoord;    
+    uniform mat4 uMVMatrix;
+    uniform mat4 uPMatrix;
+    varying vec4 pass_Color;
+    varying vec2 pass_TextureCoord;
+    void main(void) {
+      gl_Position = uPMatrix * uMVMatrix * in_Position;
+      
+      pass_Color = in_Color;
+      pass_TextureCoord = in_TextureCoord;
+    }
+  </script>
+
+  <!-- Radial distortion filter shaders  -->
+  
+  <script id="undistortion-shader-fs" type="x-shader/x-fragment">
+    // Renders to the target framebuffer an undistorted version of the input
+    // texture via an approximate radial undistortion filtering
+    precision mediump float;
+    
+    uniform sampler2D texture_diffuse;
+    uniform vec2 image_dimensions;
+    uniform float alphax;
+    uniform float alphay;
+    
+    varying vec4 pass_Color;
+    varying vec2 pass_TextureCoord;
+
+    void main(void) {
+    
+      // Normalize the u,v coordinates in the range [-1;+1]
+      float x = (2.0 * pass_TextureCoord.x - 1.0) / 1.0;
+      float y = (2.0 * pass_TextureCoord.y - 1.0) / 1.0;
+      
+      // Calculate l2 norm
+      float r = x*x + y*y;
+      
+      // Calculate the deflated or inflated new coordinate (reverse transform)
+      float x3 = x / (1.0 - alphax * r);
+		  float y3 = y / (1.0 - alphay * r); 
+			float x2 = x / (1.0 - alphax * (x3 * x3 + y3 * y3));
+			float y2 = y / (1.0 - alphay * (x3 * x3 + y3 * y3));	
+      
+      // Forward transform
+      // float x2 = x * (1.0 - alphax * r);
+      // float y2 = y * (1.0 - alphay * r);
+
+      // De-normalize to the original range
+      float i2 = (x2 + 1.0) * 1.0 / 2.0;
+      float j2 = (y2 + 1.0) * 1.0 / 2.0;
+    
+      if(i2 >= 0.0 && i2 <= 1.0 && j2 >= 0.0 && j2 <= 1.0)
+        gl_FragColor = texture2D(texture_diffuse, vec2(i2, j2));
+      else
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+  </script>
+  <script id="neuter-shader-vs" type="x-shader/x-vertex">    
+    // A neuter vertex shader, just passes XYZW, RGBA, UV coords to the
+    // next fragment shader
+
+    attribute vec4 in_Position;
+    attribute vec4 in_Color;
+    attribute vec2 in_TextureCoord;    
+
+    varying vec4 pass_Color;
+    varying vec2 pass_TextureCoord;
+
+    uniform mat4 uMVMatrix;
+    uniform mat4 uPMatrix;
+    
+    void main(void) {
+      gl_Position = uPMatrix * uMVMatrix * in_Position;
+      
+      pass_Color = in_Color;
+      pass_TextureCoord = in_TextureCoord;
+    }
+  </script>
+  
+  <!-- Edge detection filter shaders -->
+  <script id="edgedetection-shader-fs" type="x-shader/x-fragment">
+    // Renders to the target framebuffer the result of a sobel edge-detection kernel
+    precision mediump float;
+    
+    uniform sampler2D input_texture;
+    uniform vec2 input_texture_size;
+    
+    varying vec4 pass_Color; // Unused/for debugging purposes
+    varying vec2 pass_TextureCoord;
+
+    float applyThreshold(float value, float threshold) {
+      if(value < threshold)
+        value = 0.0;
+      return value;
+    }
+
+    void main(void) {
+    
+      float sobel_kernel[9];
+      sobel_kernel[0] = -1.0; sobel_kernel[1] = 0.0; sobel_kernel[2] = +1.0;
+      sobel_kernel[3] = -2.0; sobel_kernel[4] = 0.0; sobel_kernel[5] = +2.0;
+      sobel_kernel[6] = -1.0; sobel_kernel[7] = 0.0; sobel_kernel[8] = +1.0;
+      
+      float result_r = 0.0;
+      float result_g = 0.0;
+      float result_b = 0.0;
+      float result_a = 0.0;
+      for(int j=-1; j<=1; ++j) {
+        for(int i=-1; i<=1; ++i) {        
+          // Convert to a texture pixel increment in the [-1;1] interval
+          float i_f = float(i) * (1.0/input_texture_size.x);
+          float j_f = float(j) * (1.0/input_texture_size.y);
+          float x = pass_TextureCoord.x + i_f;
+          float y = pass_TextureCoord.y + j_f;
+          vec4 pixel = vec4(0.0, 0.0, 0.0, 1.0);
+          if(!(x < 0.0 || x > input_texture_size.x || 
+               y < 0.0 || y > input_texture_size.y))
+          {
+            vec4 pixel = texture2D(input_texture, vec2(x,y));
+            float kernel_val = sobel_kernel[(j + 1) * 3 + (i + 1)];
+            result_r += pixel.r * kernel_val;
+            result_g += pixel.g * kernel_val;
+            result_b += pixel.b * kernel_val;
+            result_a += pixel.a * kernel_val;
+          }
+        }
+      }
+      //result_r /= 8.0;
+      //result_g /= 8.0;
+      //result_b /= 8.0;
+      //result_a /= 8.0;
+     
+      // Apply a threshold to the result
+      const float threshold = 0.25;
+      result_r = applyThreshold(result_r, threshold);
+      result_g = applyThreshold(result_g, threshold);
+      result_b = applyThreshold(result_b, threshold);
+      result_a = applyThreshold(result_a, threshold);
+      
+      gl_FragColor = vec4(result_r, result_g, result_b, 1.0);     
+    }
+  </script>
+  
+  <script type="text/javascript">
+    var gl; // gl instance
+    
+    function webGLStart() {
+      var canvas = document.getElementById("filter-canvas");
+      try {
+        gl = canvas.getContext("experimental-webgl");
+        gl.viewportWidth = canvas.width;
+        gl.viewportHeight = canvas.height;
+      } catch (e) {}
+      if (!gl) {
+        alert("Could not initialize WebGL");
+      }
+   
+      setupQuad();
+      initFramebuffer();
+      initShaderPrograms();
+      initTextures();
+      
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clearColor(0.0, 0.0, 0.0, 1.0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enable(gl.DEPTH_TEST));
+      
+      paintLoop();
+    }
+    
+    // Geometric and quad rendering data
+    var vboId;  // Quad data
+    var vboiId; // Quad indices
+    var indices_count;
+    var mvMatrix = mat4.create(); // Warning: does not default to identity
+    var pMatrix = mat4.create();  // Warning: does not default to identity
+
+    // Input texture
+    var textureId;
+    var imageDimensions = [0.0, 0.0];
+    var textureIsSafeToRender = false; // Indicates whether the texture has been loaded
+
+    // Distortion correction factors
+    var alphax = 0.0;
+    var alphay = 0.0;
+    var maximum_alpha = 0.25;
+
+    // Shader programs
+    var undistortionShaderProgram; // Applies the undistortion filtering
+    var edgeDetectionShaderProgram; // Applies a sobel edge detection
+    var debugProgram; // Just visualizes a texture
+
+    // Secondary framebuffers for intermediate computations
+    var renderFrameBuffer;
+    var undistortionTexture;
+    var edgeDetectionTexture;
+
+    // Utility function to get and compile a shader
+    function getShader(gl, id) {
+      var shaderScript = document.getElementById(id);
+      if (!shaderScript)
+          return null;
+
+      var str = "";
+      var k = shaderScript.firstChild;
+      while (k) {
+          if (k.nodeType == 3) { // Check for TEXT_NODE
+            str += k.textContent;
+          }
+          k = k.nextSibling;
+      }
+
+      var shader;
+      if (shaderScript.type == "x-shader/x-fragment") {
+        ctx = WebGLDebugUtils.makeDebugContext(shader = gl.createShader(gl.FRAGMENT_SHADER));
+      } else if (shaderScript.type == "x-shader/x-vertex") {
+        ctx = WebGLDebugUtils.makeDebugContext(shader = gl.createShader(gl.VERTEX_SHADER));
+      } else {
+        return null;
+      }
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.shaderSource(shader, str));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.compileShader(shader));
+
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        alert(gl.getShaderInfoLog(shader));
+        return null;
+      }
+
+      return shader;
+    }
+
+    // Init the undistortion framebuffer and its texture
+    function initFramebuffer() {
+      ctx = WebGLDebugUtils.makeDebugContext(renderFrameBuffer = gl.createFramebuffer());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer));
+      renderFrameBuffer.width = 512;
+      renderFrameBuffer.height = 512;
+
+      var renderbuffer;
+      ctx = WebGLDebugUtils.makeDebugContext(renderbuffer = gl.createRenderbuffer());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, renderFrameBuffer.width, renderFrameBuffer.height));
+
+      //ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, undistortionTexture, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, renderbuffer));
+      
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, null));
+    }
+
+    function attachTextureToFrameBuffer(texture) {
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, null));
+    }
+
+    function initShaderPrograms() {
+      // ~-~-~-~-~-~-~- Init the undistortion shader program ~-~-~-~-~-~-~-
+      var fragmentShader = getShader(gl, "undistortion-shader-fs");
+      var vertexShader = getShader(gl, "neuter-shader-vs");
+
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(undistortionShaderProgram, vertexShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(undistortionShaderProgram, fragmentShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(undistortionShaderProgram));
+
+      if (!gl.getProgramParameter(undistortionShaderProgram, gl.LINK_STATUS)) {
+          alert("Could not initialize shaders");
+      }
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(undistortionShaderProgram));
+
+      // Enable vertex attribute arrays for position, color, uvs
+      
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.inPosition = gl.getAttribLocation(undistortionShaderProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(undistortionShaderProgram.inPosition));
+
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.inColor = gl.getAttribLocation(undistortionShaderProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(undistortionShaderProgram.inColor));
+      
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.inTextureCoord = gl.getAttribLocation(undistortionShaderProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(undistortionShaderProgram.inTextureCoord));
+      
+      // Bind uniforms for matrices
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.pMatrixUniform = gl.getUniformLocation(undistortionShaderProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.mvMatrixUniform = gl.getUniformLocation(undistortionShaderProgram, "uMVMatrix"));
+      
+      // Bind uniform for image dimensions and alpha factors
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.imageDimensionsUniform = gl.getUniformLocation(undistortionShaderProgram, "image_dimensions"));
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.alphax = gl.getUniformLocation(undistortionShaderProgram, "alphax"));
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.alphay = gl.getUniformLocation(undistortionShaderProgram, "alphay"));
+      
+      // ~-~-~-~-~-~-~- Init the edge detection shader program ~-~-~-~-~-~-~-
+      
+      var edgeFragmentShader = getShader(gl, "edgedetection-shader-fs");
+      var edgeVertexShader = getShader(gl, "neuter-shader-vs");
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(edgeDetectionShaderProgram, edgeVertexShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(edgeDetectionShaderProgram, edgeFragmentShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(edgeDetectionShaderProgram));
+      if (!gl.getProgramParameter(edgeDetectionShaderProgram, gl.LINK_STATUS)) {
+        alert("Could not initialize shaders");
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(edgeDetectionShaderProgram));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.inPosition = gl.getAttribLocation(edgeDetectionShaderProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(edgeDetectionShaderProgram.inPosition));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.inColor = gl.getAttribLocation(edgeDetectionShaderProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(edgeDetectionShaderProgram.inColor));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.inTextureCoord = gl.getAttribLocation(edgeDetectionShaderProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(edgeDetectionShaderProgram.inTextureCoord));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.pMatrixUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.mvMatrixUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "uMVMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.imageDimensionsUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "input_texture_size"));
+
+      // ~-~-~-~-~-~-~- Init the debug shader program ~-~-~-~-~-~-~-
+
+      var debugFragmentShader = getShader(gl, "debug-fs");
+      var debugVertexShader = getShader(gl, "debug-vs");
+      ctx = WebGLDebugUtils.makeDebugContext(debugProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(debugProgram, debugVertexShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(debugProgram, debugFragmentShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(debugProgram));
+      if (!gl.getProgramParameter(debugProgram, gl.LINK_STATUS)) {
+        alert("Could not initialize shaders");
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(debugProgram));
+      ctx = WebGLDebugUtils.makeDebugContext(debugProgram.inPosition = gl.getAttribLocation(debugProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(debugProgram.inPosition));
+      ctx = WebGLDebugUtils.makeDebugContext(debugProgram.inColor = gl.getAttribLocation(debugProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(debugProgram.inColor));
+      ctx = WebGLDebugUtils.makeDebugContext(debugProgram.inTextureCoord = gl.getAttribLocation(debugProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(debugProgram.inTextureCoord));
+      ctx = WebGLDebugUtils.makeDebugContext(debugProgram.pMatrixUniform = gl.getUniformLocation(debugProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(debugProgram.mvMatrixUniform = gl.getUniformLocation(debugProgram, "uMVMatrix"));
+    }
+    
+    function setupQuad() {
+      // Set up VBO with quad data
+      ctx = WebGLDebugUtils.makeDebugContext(vboId = gl.createBuffer());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      var vbo_data = [
+        -1.0, 1.0, -1.0, 1.0,   // Vertex (xyzw)
+        1.0, 0.0, 0.0, 1.0,     // RGBA
+        0.0, 1.0,               // UV coords
+        
+        -1.0, -1.0, -1.0, 1.0,  // Vertex (xyzw)
+        0.0, 1.0, 0.0, 1.0,     // RGBA
+        0.0, 0.0,               // UV coords
+        
+        1.0, -1.0, -1.0, 1.0,   // Vertex (xyzw)
+        0.0, 0.0, 1.0, 1.0,     // RGBA
+        1.0, 0.0,               // UV coords
+        
+        1.0, 1.0, -1.0, 1.0,    // Vertex (xyzw)
+        1.0, 1.0, 1.0, 1.0,     // RGBA
+        1.0, 1.0                // UV coords
+      ];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vbo_data), gl.STATIC_DRAW));
+      // Set up VBO with indices data
+      ctx = WebGLDebugUtils.makeDebugContext(vboiId = gl.createBuffer());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+      var indices = [
+        0, 1, 2,
+        2, 3, 0
+      ];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW));
+      indices_count = indices.length;      
+    }    
+
+    function initTextures() {
+      // ~-~-~-~-~-~- Input texture ~-~-~-~-~-~-
+      ctx = WebGLDebugUtils.makeDebugContext(textureId = gl.createTexture());
+      textureId.image = new Image();
+      textureId.image.onload = function () {
+        ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textureId.image));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+        textureIsSafeToRender = true;
+      }      
+      textureId.image.src = "assets/pincushion_distortion.png";
+      imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
+
+      // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
+      ctx = WebGLDebugUtils.makeDebugContext(undistortionTexture = gl.createTexture());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
+                                             renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+      // ~-~-~-~-~-~- Edge-detected texture ~-~-~-~-~-~-
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionTexture = gl.createTexture());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, edgeDetectionTexture));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
+                                             renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+    }
+
+    // Render an undistorted image in the framebuffer texture
+    function renderUndistortedInFramebuffer() {
+      // Bind secondary framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
+
+      // Makes sure we're rendering the entire texture (this will LATER be mapped to the viewport)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 512, 512));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));     
+
+      // Set up undistortion shader program
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(undistortionShaderProgram));
+
+      // Set up projection and movelview uniforms
+      // Map the texture perfectly to the viewport (i.e. project the quad to the front)
+      mat4.identity(pMatrix);
+      mat4.identity(mvMatrix);
+      //mat4.translate(mvMatrix, [0.0, 0.0, -1.0]);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(undistortionShaderProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(undistortionShaderProgram.mvMatrixUniform, false, mvMatrix));
+
+      // ------------ Filtering-specific data ------------
+      // Set image dimensions uniform
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(undistortionShaderProgram.imageDimensionsUniform, imageDimensions));
+
+      // Set alpha factors uniforms
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1fv(undistortionShaderProgram.alphax, new Float32Array([alphax])));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1fv(undistortionShaderProgram.alphay, new Float32Array([alphay])));
+      // --------------------------------------------------
+
+      // Bind texture to texture unit 0
+      ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId));
+      var sampler2D_loc = gl.getUniformLocation(undistortionShaderProgram, "texture_diffuse");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
+
+      // Bind vertex data and set vertex attributes (as from a VAO)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(undistortionShaderProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(undistortionShaderProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(undistortionShaderProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+
+      // Bind vertex index info
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+
+      // Draw the quad
+      ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
+
+      // Cleanup
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+      // Restore normal framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+
+    // Render an edge detected texture
+    function renderEdgeDetectedInFramebuffer() {
+      // Bind secondary framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
+
+      // Makes sure we're rendering the entire texture (this will LATER be mapped to the viewport)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 512, 512));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
+
+      // Set up edge detection shader program
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(edgeDetectionShaderProgram));
+
+      // Set up projection and movelview uniforms
+      // Map the texture perfectly to the viewport (i.e. project the quad to the front)
+      mat4.identity(pMatrix);
+      mat4.identity(mvMatrix);
+      //mat4.translate(mvMatrix, [0.0, 0.0, -1.0]);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(edgeDetectionShaderProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(edgeDetectionShaderProgram.mvMatrixUniform, false, mvMatrix));
+
+      // Set image dimensions uniform
+      var textureDimensions = [512.0, 512.0];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.imageDimensionsUniform, textureDimensions));
+
+      // Bind texture to texture unit 0
+      ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
+      var sampler2D_loc = gl.getUniformLocation(edgeDetectionShaderProgram, "input_texture");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
+
+      // Bind vertex data and set vertex attributes (as from a VAO)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(edgeDetectionShaderProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(edgeDetectionShaderProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(edgeDetectionShaderProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+
+      // Bind vertex index info
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+
+      // Draw the quad
+      ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
+
+      // Cleanup
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+      // Restore normal framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    
+    function drawScene() {
+      
+      if(textureIsSafeToRender == false)
+        return; // Still can't render stuff if the texture hasn't been loaded yet
+
+      // First render an undistorted image in the framebuffer texture
+      attachTextureToFrameBuffer(undistortionTexture);
+      renderUndistortedInFramebuffer();
+
+      // Render the sobel-filtered texture
+      attachTextureToFrameBuffer(edgeDetectionTexture);
+      renderEdgeDetectedInFramebuffer();
+
+      // TODO!
+
+
+
+
+
+
+
+
+
+
+
+      // Debug
+      var img = document.getElementById("debug-img");
+      img.src = createImageFromTexture(gl, edgeDetectionTexture, 512, 512);
+      
+      // Debug - re-render back
+
+      // This time only draw the canvas size
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
+      //mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 100.0, pMatrix);
+      mat4.identity(pMatrix);
+      mat4.identity(mvMatrix);
+      //mat4.translate(mvMatrix, [0.0, 0.0, -1.2]);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(debugProgram)); // Set up debug program
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(debugProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(debugProgram.mvMatrixUniform, false, mvMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));      
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
+      var sampler2D_loc = gl.getUniformLocation(debugProgram, "texture_diffuse");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(debugProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(debugProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(debugProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+    }
+    
+    function paintLoop() {    
+      requestAnimFrame(paintLoop);
+      drawScene();      
+    }
+    
+    // ~-~-~-~-~-~-~-~-~- UI related handling routines ~-~-~-~-~-~-~-~-~-
+    
+    var same_alpha_factors = true; // Whether alphax and alphay are forced to be equal
+    
+    function adjustAlphaFactor(direction, value) { // value should be in range [0;100]
+      switch(direction) {
+        case 'x': {
+          alphax = (value * 0.01) * maximum_alpha;
+          document.getElementById("alphax_value").value = alphax;
+          if(same_alpha_factors) {
+            alphay = alphax;
+            document.getElementById("alphay_slider").value = value;
+            document.getElementById("alphay_value").value = alphay;
+          }
+        } break;
+        case 'y': {
+          alphay = (value * 0.01) * maximum_alpha;
+          document.getElementById("alphay_value").value = alphay;
+          if(same_alpha_factors) {
+            alphax = alphay;
+            document.getElementById("alphax_slider").value = value;
+            document.getElementById("alphax_value").value = alphax;
+          }
+        } break;
+      }
+    }
+    // ~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-
+        
+  </script>
+</head>
+<body onload="webGLStart();">
+  <div style="padding: 10px;">
+    <div style="float: left;">
+      <!-- WARNING: KEEP THE DIMENSIONS UNDER 512x512, OTHERWISE A BIGGER TEXTURE IS NEEDED -->
+      <canvas id="filter-canvas" style="border: none;" width="500" height="500"></canvas>
+    </div>
+    <div style="float: left; padding: 10px;">
+      <input type="checkbox" onchange="same_alpha_factors = this.checked;" checked/>Force square pixels<br/><br/>
+      Adjust horizontal distortion parameter<br/>
+      <input id="alphax_slider" type="range" style="vertical-align:middle;" min="0" max="100" value="0" onchange="adjustAlphaFactor('x', this.value)"
+       oninput="adjustAlphaFactor('x', this.value)"/>
+      <input type="text" id="alphax_value" style="vertical-align:middle; width: 50px; text-align: center;" value="0.0" readonly><br/>
+      Adjust vertical distortion parameter<br/>
+      <input id="alphay_slider" type="range" style="vertical-align:middle;" min="0" max="100" value="0" onchange="adjustAlphaFactor('y', this.value)"
+      oninput="adjustAlphaFactor('y', this.value)"/>
+      <input type="text" id="alphay_value" style="vertical-align:middle; width: 50px; text-align: center;" value="0.0" readonly><br/>
+      <div style="float: left; padding: 20px">
+          <img style="vertical-align:middle;" src="http://marcodiiga.github.io/images/webicon-github-m.png"/>
+          <a href="https://github.com/marcodiiga/lens_distortion_filtering">Github Repo</a>
+      </div>
+    </div>
+  </div>
+  <img id="debug-img" />
+</body>
+</html>

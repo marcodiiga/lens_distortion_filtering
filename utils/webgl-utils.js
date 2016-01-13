@@ -173,3 +173,56 @@ window.requestAnimFrame = (function() {
          };
 })();
 
+
+/**
+ * Output a WebGL texture into an image for debugging purposes.
+ * @param {gl} gl context
+ * @param {texture} texture to output (must be stored with UNPACK_FLIP_Y_WEBGL)
+ * @param {width} width of the texture
+ * @param {height} height of the texture
+ * @return {DOMString} The data URI containing a representation
+ *         of the image.
+ *
+ * Example usage:
+ *
+ *     <img id="debug-img" />
+ *
+ *     var img = document.getElementById("debug-img");
+ *     img.src = createImageFromTexture(gl, texture, texture.width, texture.height);
+ */
+function createImageFromTexture(gl, texture, width, height) {
+  // Create a framebuffer backed by the texture
+  var framebuffer;
+  ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());
+  ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
+  ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
+
+  // Read the contents of the framebuffer
+  var data = new Uint8Array(width * height * 4);
+  var data_flipped = new Uint8Array(width * height * 4);
+  ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data));
+  // Flip webgl data (usually Y-inverse stored)
+  for (y = 0; y < height; ++y) {
+    for (x = 0; x < width; ++x) {
+      data_flipped[y * width * 4 + x * 4] = data[(height - 1 - y) * width * 4 + x * 4];
+      data_flipped[y * width * 4 + x * 4 + 1] = data[(height - 1 - y) * width * 4 + x * 4 + 1];
+      data_flipped[y * width * 4 + x * 4 + 2] = data[(height - 1 - y) * width * 4 + x * 4 + 2];
+      data_flipped[y * width * 4 + x * 4 + 3] = data[(height - 1 - y) * width * 4 + x * 4 + 3];
+    }
+  }
+
+  ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+
+  // Create a 2D canvas to store the result 
+  var canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  var context = canvas.getContext('2d');
+
+  // Copy the pixels to a 2D canvas
+  var imageData = context.createImageData(width, height);
+  imageData.data.set(data_flipped);
+  context.putImageData(imageData, 0, 0);
+
+  return canvas.toDataURL();
+}
