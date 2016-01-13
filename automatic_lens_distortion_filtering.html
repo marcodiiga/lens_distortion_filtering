@@ -50,6 +50,11 @@
     varying vec4 pass_Color;
     varying vec2 pass_TextureCoord;
 
+    // Deals with floating point imprecisions
+    bool isAboutEqual(float v1, float v2) {
+      return abs(v1 - v2) < 0.01;
+    }
+
     void main(void) {
     
       // Normalize the u,v coordinates in the range [-1;+1]
@@ -57,7 +62,7 @@
       float y = (2.0 * pass_TextureCoord.y - 1.0) / 1.0;
       
       // Calculate l2 norm
-      float r = x*x + y*y;
+      float r = x * x + y * y;
       
       // Calculate the deflated or inflated new coordinate (reverse transform)
       float x3 = x / (1.0 - alphax * r);
@@ -71,12 +76,28 @@
 
       // De-normalize to the original range
       float i2 = (x2 + 1.0) * 1.0 / 2.0;
-      float j2 = (y2 + 1.0) * 1.0 / 2.0;
+      float j2 = (y2 + 1.0) * 1.0 / 2.0;      
     
-      if(i2 >= 0.0 && i2 <= 1.0 && j2 >= 0.0 && j2 <= 1.0)
-        gl_FragColor = texture2D(texture_diffuse, vec2(i2, j2));
-      else
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      if(i2 >= 0.0 && i2 <= 1.0 && j2 >= 0.0 && j2 <= 1.0) // If a valid texture coord
+      {
+        vec4 texture_color = texture2D(texture_diffuse, vec2(i2, j2));    
+
+        // Important: borders are unreliable in lens correction (they incorrectly ramp up Sobel
+        // kernel's response). In order to detect those we set the alpha value to 0
+        // on the border of the input image before transferring it to the GPU
+
+        float alpha = 1.0;
+        if(isAboutEqual(pass_TextureCoord.x, 0.0) ||
+           isAboutEqual(pass_TextureCoord.y, 0.0) ||
+           isAboutEqual(pass_TextureCoord.x, 1.0) ||
+           isAboutEqual(pass_TextureCoord.y, 1.0))
+          alpha = 0.0;
+            
+        texture_color.a = alpha;
+
+        gl_FragColor = texture_color; // Finally store the result
+      } else
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); // alpha is set to zero, i.e. don't compute
     }
   </script>
   <script id="neuter-shader-vs" type="x-shader/x-vertex">    
@@ -108,6 +129,16 @@
     
     uniform sampler2D input_texture;
     uniform vec2 input_texture_size;
+
+    //
+    // Rotation vectors for the kernel. We're interested into covering a 360°
+    // region for a pixel by rotating the sobel kernel multiple times. Since
+    // we only care for edge directions and not orientation we'll sweep 180°
+    // by using 15 degrees increments, i.e. 180/15 = 12 increments. To speed the
+    // computation we precompute these vectors (as a couple of (x;y) vector
+    // components) on the CPU and then pass it to the shader here.
+    //
+    uniform vec2 rotation_du[12];
     
     varying vec4 pass_Color; // Unused/for debugging purposes
     varying vec2 pass_TextureCoord;
@@ -115,53 +146,150 @@
     float applyThreshold(float value, float threshold) {
       if(value < threshold)
         value = 0.0;
+      else
+        value = 1.0; // Standardized response
       return value;
     }
 
+    // Check if a point (range [0;1]) is out of the input texture
+    bool isOutOfTexture(vec2 point) {
+      if(point.x < 0.0 || point.x >= input_texture_size.x ||
+         point.y < 0.0 || point.y >= input_texture_size.y)
+        return true;
+      else
+        return false;
+    }
+
+    // Any computation involving the texture border is unreliable. Check if
+    // this point is on a alpha == 0 component and return true if it is
+    bool isOnTextureBorder(vec4 texel_color) {
+      if(texel_color.a == 0.0)
+        return true;
+      else
+        return false;
+    }
+
     void main(void) {
-    
-      float sobel_kernel[9];
-      sobel_kernel[0] = -1.0; sobel_kernel[1] = 0.0; sobel_kernel[2] = +1.0;
-      sobel_kernel[3] = -2.0; sobel_kernel[4] = 0.0; sobel_kernel[5] = +2.0;
-      sobel_kernel[6] = -1.0; sobel_kernel[7] = 0.0; sobel_kernel[8] = +1.0;
       
+      // Responses to the filter per each channel (sum of all kernel rotations)
       float result_r = 0.0;
       float result_g = 0.0;
       float result_b = 0.0;
       float result_a = 0.0;
-      for(int j=-1; j<=1; ++j) {
-        for(int i=-1; i<=1; ++i) {        
-          // Convert to a texture pixel increment in the [-1;1] interval
-          float i_f = float(i) * (1.0/input_texture_size.x);
-          float j_f = float(j) * (1.0/input_texture_size.y);
-          float x = pass_TextureCoord.x + i_f;
-          float y = pass_TextureCoord.y + j_f;
-          vec4 pixel = vec4(0.0, 0.0, 0.0, 1.0);
-          if(!(x < 0.0 || x > input_texture_size.x || 
-               y < 0.0 || y > input_texture_size.y))
-          {
-            vec4 pixel = texture2D(input_texture, vec2(x,y));
-            float kernel_val = sobel_kernel[(j + 1) * 3 + (i + 1)];
-            result_r += pixel.r * kernel_val;
-            result_g += pixel.g * kernel_val;
-            result_b += pixel.b * kernel_val;
-            result_a += pixel.a * kernel_val;
-          }
+
+      // Loop over all the rotation vectors (equivalent to rotating the kernel)
+      for(int i = 0; i < 12; ++i) {
+        vec2 du = rotation_du[i];
+        vec2 dv = vec2(du.y, -du.x); // Obtain the perpendicular vector
+
+        //
+        // float sobel_kernel[9];
+        // sobel_kernel[0] = -1.0; sobel_kernel[1] = 0.0; sobel_kernel[2] = +1.0;
+        // sobel_kernel[3] = -1.5; sobel_kernel[4] = 0.0; sobel_kernel[5] = +1.5;
+        // sobel_kernel[6] = -1.0; sobel_kernel[7] = 0.0; sobel_kernel[8] = +1.0;
+
+        // << Row 1 >>
+
+        vec2 p1 = pass_TextureCoord + du - dv; // Texture texel to be multiplied with kernel position 2
+        vec2 p2 = pass_TextureCoord - du - dv; // ditto with ker pos 0
+        
+        if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
+          // Force the response to be 0 and bail out
+          result_r = 0.0;
+          result_g = 0.0;
+          result_b = 0.0;
+          result_a = 0.0;
+          break;
         }
+        
+        vec4 p1_rgba = texture2D(input_texture, p1);
+        vec4 p2_rgba = texture2D(input_texture, p2);
+        
+        if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
+          // Force the response to be 0 and bail out
+          result_r = 0.0;
+          result_g = 0.0;
+          result_b = 0.0;
+          result_a = 0.0;
+          break;
+        }
+
+        result_r += p1_rgba.r - p2_rgba.r;
+        result_g += p1_rgba.g - p2_rgba.g;
+        result_b += p1_rgba.b - p2_rgba.b;
+        result_a += p1_rgba.a - p2_rgba.a;
+
+        // << Row 2 >>
+
+        p1 = pass_TextureCoord + du; // Texture texel to be multiplied with kernel position 5
+        p2 = pass_TextureCoord - du; // ditto with ker pos 3
+        
+        if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
+          // Force the response to be 0 and bail out
+          result_r = 0.0;
+          result_g = 0.0;
+          result_b = 0.0;
+          result_a = 0.0;
+          break;
+        }
+        
+        p1_rgba = texture2D(input_texture, p1);
+        p2_rgba = texture2D(input_texture, p2);
+        
+        if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
+          // Force the response to be 0 and bail out
+          result_r = 0.0;
+          result_g = 0.0;
+          result_b = 0.0;
+          result_a = 0.0;
+          break;
+        }
+
+        result_r += 1.5 * (p1_rgba.r - p2_rgba.r);
+        result_g += 1.5 * (p1_rgba.g - p2_rgba.g);
+        result_b += 1.5 * (p1_rgba.b - p2_rgba.b);
+        result_a += 1.5 * (p1_rgba.a - p2_rgba.a);
+
+        // << Row 2 >>
+
+        p1 = pass_TextureCoord + du + dv; // Texture texel to be multiplied with kernel position 8
+        p2 = pass_TextureCoord - du + dv; // ditto with ker pos 6
+        
+        if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
+          // Force the response to be 0 and bail out
+          result_r = 0.0;
+          result_g = 0.0;
+          result_b = 0.0;
+          result_a = 0.0;
+          break;
+        }
+        
+        p1_rgba = texture2D(input_texture, p1);
+        p2_rgba = texture2D(input_texture, p2);
+        
+        if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
+          // Force the response to be 0 and bail out
+          result_r = 0.0;
+          result_g = 0.0;
+          result_b = 0.0;
+          result_a = 0.0;
+          break;
+        }
+
+        result_r += p1_rgba.r - p2_rgba.r;
+        result_g += p1_rgba.g - p2_rgba.g;
+        result_b += p1_rgba.b - p2_rgba.b;
+        result_a += p1_rgba.a - p2_rgba.a;
+        
       }
-      //result_r /= 8.0;
-      //result_g /= 8.0;
-      //result_b /= 8.0;
-      //result_a /= 8.0;
-     
-      // Apply a threshold to the result
-      const float threshold = 0.25;
-      result_r = applyThreshold(result_r, threshold);
-      result_g = applyThreshold(result_g, threshold);
-      result_b = applyThreshold(result_b, threshold);
-      result_a = applyThreshold(result_a, threshold);
-      
-      gl_FragColor = vec4(result_r, result_g, result_b, 1.0);     
+
+
+      // Sum all responses before thresholding
+      float total_response = result_r + result_g + result_b + result_a;
+
+      total_response = applyThreshold(total_response, 0.5);
+    
+      gl_FragColor = vec4(total_response, total_response, total_response, 1.0);
     }
   </script>
   
@@ -333,7 +461,22 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(edgeDetectionShaderProgram.inTextureCoord));
       ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.pMatrixUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "uPMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.mvMatrixUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "uMVMatrix"));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.imageDimensionsUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "input_texture_size"));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.texture_size = gl.getUniformLocation(edgeDetectionShaderProgram, "input_texture_size"));
+      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.rotation_du = gl.getUniformLocation(edgeDetectionShaderProgram, "rotation_du"));
+
+      //var rotation_du = gl.createBuffer();
+      //gl.bindBuffer(GL_UNIFORM_BUFFER, rotation_du);
+      var vectors = new Float32Array(12 * 2); // 12 vec2 increments, i.e. 180 / 15 degrees (see fragment shader)
+      var angle_increment_degrees = 15.0;
+      for (i = 0; i < 12; i++) {
+        var angle_radians = (i * angle_increment_degrees) / 180.0 * Math.PI;
+
+        vectors[i * 2] = Math.cos(angle_radians) / 512.0;
+        vectors[i * 2 + 1] = Math.sin(angle_radians) / 512.0;
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.rotation_du, vectors));
+      //gl.bufferData(GL_UNIFORM_BUFFER, 12 * 4 /* sizeof(float) */, NULL, GL_DYNAMIC_DRAW);
+
 
       // ~-~-~-~-~-~-~- Init the debug shader program ~-~-~-~-~-~-~-
 
@@ -397,6 +540,14 @@
       textureId.image.onload = function () {
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId));
         ctx = WebGLDebugUtils.makeDebugContext(gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true));
+        
+
+        // Important: borders are unreliable in lens correction (they incorrectly ramp up Sobel
+        // kernel's response). In order to detect those we set the alpha value to 0
+        // on the border of the input image before transferring it to the GPU
+
+        //textureId.image
+
         ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textureId.image));
         ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
         ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
@@ -501,9 +652,13 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(edgeDetectionShaderProgram.pMatrixUniform, false, pMatrix));
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(edgeDetectionShaderProgram.mvMatrixUniform, false, mvMatrix));
 
-      // Set image dimensions uniform
-      var textureDimensions = [512.0, 512.0];
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.imageDimensionsUniform, textureDimensions));
+      // Set texture delta uniforms
+      var du = [1.0 / 512.0, 0.0];
+      var dv = [0.0, 1.0 / 512.0];
+      var texture_size = [512.0, 512.0];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.texture_delta_du, du));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.texture_delta_dv, dv));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.texture_size, texture_size));
 
       // Bind texture to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
