@@ -268,7 +268,6 @@
         result_g += (p1_rgba.g - p2_rgba.g);
         result_b += (p1_rgba.b - p2_rgba.b);
 
-
         // Sum all responses before thresholding
         float total_response = result_r + result_g + result_b;
 
@@ -605,23 +604,22 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
 
       // ~-~-~-~-~-~- Histogram computing textures ~-~-~-~-~-~-
+      ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_0 = gl.createTexture());
       ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_1 = gl.createTexture());
       ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_2 = gl.createTexture());
-      ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_3 = gl.createTexture());
       
       var setTextureSize = function () {
-        // These are set to NEAREST since they'll contain just per-pixel data
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
         ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
                                                renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
       }
 
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_0));
+      setTextureSize();
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_1));
       setTextureSize();
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_2));
-      setTextureSize();
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_3));
       setTextureSize();
 
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
@@ -712,7 +710,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramComputerShaderProgram.pMatrixUniform, false, pMatrix));
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramComputerShaderProgram.mvMatrixUniform, false, mvMatrix));
 
-      // Set texture delta uniforms
+      // Set texture size uniforms
       var texture_size = [512.0, 512.0];
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.texture_size, texture_size));
 
@@ -771,13 +769,16 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.pMatrixUniform, false, pMatrix));
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.mvMatrixUniform, false, mvMatrix));
 
-      // Set texture delta uniforms
+      // Set texture size uniforms
       var texture_size = [512.0, 512.0];
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramReductionShaderProgram.texture_size, texture_size));
 
       // Bind the right texture input to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_part));
+      // Since these are data textures, in order to facilitate lookup set nearest filters
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
       var sampler2D_loc = gl.getUniformLocation(histogramReductionShaderProgram, "input_texture");
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
 
@@ -815,17 +816,15 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
       ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
       // Read the contents of the texture from the framebuffer
-      var data = new ArrayBuffer(512 * 4 * 4); // 4 floats per 4 angle in a 512 row
-      var data_uint8_view = new Uint8Array(data, 0, data.byteLength);
-      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, 512, 1, gl.RGBA, gl.UNSIGNED_BYTE, data_uint8_view));
-      var dataview = new DataView(data);
+      var data_uint8 = new Uint8Array(512 * 1 * 4); // 512 x 1 normalized floats times 4 angles
+      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, 512, 1, gl.RGBA, gl.UNSIGNED_BYTE, data_uint8));
       var result_angles = new Float32Array(4);
       // Reduce data
       for (i = 0; i < 512; ++i) {
-        result_angles[0] += dataview.getFloat32(i * 4);
-        result_angles[1] += dataview.getFloat32(i * 4 + 1);
-        result_angles[2] += dataview.getFloat32(i * 4 + 2);
-        result_angles[3] += dataview.getFloat32(i * 4 + 3);
+        result_angles[0] += data_uint8[i * 4] / 255.0;
+        result_angles[1] += data_uint8[i * 4 + 1] / 255.0;
+        result_angles[2] += data_uint8[i * 4 + 2] / 255.0;
+        result_angles[3] += data_uint8[i * 4 + 3] / 255.0;
       }
       ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
       return result_angles;
