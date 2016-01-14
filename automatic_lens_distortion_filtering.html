@@ -120,9 +120,9 @@
     }
   </script>
   
-  <!-- Edge detection filter shaders -->
+  <!-- Histogram computer shader -->
   <script id="histogram-computer-shader-fs" type="x-shader/x-fragment">
-    // Renders to the target framebuffer the result of a sobel edge-detection kernel
+    // Computes part of an edge-response histogram in a texture
     precision mediump float;
     
     uniform sampler2D input_texture;
@@ -288,6 +288,32 @@
       gl_FragColor = angle_responses;
     }
   </script>
+
+  <!-- Reduction shader -->
+  <script id="row-reduction-shader-fs" type="x-shader/x-fragment">
+    // Reduces a WxH texture data to a single Wx1 row (4 channels each pixel)
+    precision mediump float;
+    
+    uniform sampler2D input_texture;
+    uniform vec2 input_texture_size;
+
+    varying vec4 pass_Color; // Unused/for debugging purposes
+    varying vec2 pass_TextureCoord;
+    
+    void main(void) {
+      vec4 angles_result = vec4(0.0, 0.0, 0.0, 0.0);
+      
+      // Center of texel is at 0.5
+      for(float i = 0.5; i < 1024.0; i += 1.0) { // Another workaround for constant expressions
+        if(!(i < input_texture_size.y))
+          break;
+        
+        angles_result += texture2D(input_texture, vec2(pass_TextureCoord.x, i));
+      }
+      gl_FragColor = angles_result;
+    }
+    
+  </script>
   
   <script type="text/javascript">
     var gl; // gl instance
@@ -334,6 +360,7 @@
     // Shader programs
     var undistortionShaderProgram; // Applies the undistortion filtering
     var histogramComputerShaderProgram; // Calculates the edge histogram
+    var histogramReductionShaderProgram; // Reduces an histogram texture to a single row
     var debugProgram; // Just visualizes a texture
 
     // Secondary framebuffers for intermediate computations and textures
@@ -342,6 +369,7 @@
     var histogram_responses_0;
     var histogram_responses_1;
     var histogram_responses_2;
+    var histogram_reduced_row;
 
     // Utility function to get and compile a shader
     function getShader(gl, id) {
@@ -389,6 +417,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(renderbuffer = gl.createRenderbuffer());
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer));
       ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, renderFrameBuffer.width, renderFrameBuffer.height));
+      renderFrameBuffer.renderBuffer = renderbuffer; // Save it for later use
 
       ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, renderbuffer));
       
@@ -438,7 +467,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.alphax = gl.getUniformLocation(undistortionShaderProgram, "alphax"));
       ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.alphay = gl.getUniformLocation(undistortionShaderProgram, "alphay"));
       
-      // ~-~-~-~-~-~-~- Init the edge detection shader program ~-~-~-~-~-~-~-
+      // ~-~-~-~-~-~-~- Init the histogram computer shader program ~-~-~-~-~-~-~-
       
       var edgeFragmentShader = getShader(gl, "histogram-computer-shader-fs");
       var edgeVertexShader = getShader(gl, "neuter-shader-vs");
@@ -473,6 +502,27 @@
       }
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.rotation_du, vectors));
 
+      // ~-~-~-~-~-~-~- Init the histogram reduction shader program ~-~-~-~-~-~-~-
+
+      var edgeFragmentShader = getShader(gl, "row-reduction-shader-fs");
+      var edgeVertexShader = getShader(gl, "neuter-shader-vs");
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, edgeVertexShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, edgeFragmentShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(histogramReductionShaderProgram));
+      if (!gl.getProgramParameter(histogramReductionShaderProgram, gl.LINK_STATUS)) {
+        alert("Could not initialize shaders");
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(histogramReductionShaderProgram));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.inPosition = gl.getAttribLocation(histogramReductionShaderProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramReductionShaderProgram.inPosition));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.inColor = gl.getAttribLocation(histogramReductionShaderProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramReductionShaderProgram.inColor));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.inTextureCoord = gl.getAttribLocation(histogramReductionShaderProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramReductionShaderProgram.inTextureCoord));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.pMatrixUniform = gl.getUniformLocation(histogramReductionShaderProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.mvMatrixUniform = gl.getUniformLocation(histogramReductionShaderProgram, "uMVMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.texture_size = gl.getUniformLocation(histogramReductionShaderProgram, "input_texture_size"));
 
       // ~-~-~-~-~-~-~- Init the debug shader program ~-~-~-~-~-~-~-
 
@@ -560,8 +610,9 @@
       ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_3 = gl.createTexture());
       
       var setTextureSize = function () {
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
+        // These are set to NEAREST since they'll contain just per-pixel data
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
         ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
                                                renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
       }
@@ -573,6 +624,16 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_3));
       setTextureSize();
 
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+      // ~-~-~-~-~-~- Reduction textures ~-~-~-~-~-~-
+      ctx = WebGLDebugUtils.makeDebugContext(histogram_reduced_row = gl.createTexture());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_reduced_row));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
+      // width x 1 output (one row)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
+                                             1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
     }
 
@@ -684,7 +745,92 @@
       // Restore normal framebuffer
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
-    
+
+    // Computes a reduction to one row for the histogram data. 'histogram_part' is
+    // the texture data (i.e. the texture containing part of the histogram)
+    function histogramReductionInFramebuffer(histogram_part) {
+      // Bind secondary framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
+
+      // Resize secondary framebuffer depth buffer to accommodate for the Wx1 output texture
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderFrameBuffer.renderBuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, renderFrameBuffer.width, 1));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
+
+      // Sets only one row of pixels to be computed
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 512, 1));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
+
+      // Set up histogram reduction shader program
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(histogramReductionShaderProgram));
+
+      // Set up projection and movelview uniforms
+      // Map the texture perfectly to the viewport (i.e. project the quad to the front)
+      mat4.identity(pMatrix);
+      mat4.identity(mvMatrix);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.mvMatrixUniform, false, mvMatrix));
+
+      // Set texture delta uniforms
+      var texture_size = [512.0, 512.0];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramReductionShaderProgram.texture_size, texture_size));
+
+      // Bind the right texture input to texture unit 0
+      ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_part));
+      var sampler2D_loc = gl.getUniformLocation(histogramReductionShaderProgram, "input_texture");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
+
+      // Bind vertex data and set vertex attributes (as from a VAO)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramReductionShaderProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramReductionShaderProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramReductionShaderProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+
+      // Bind vertex index info
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+
+      // Draw the quad
+      ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
+
+      // Cleanup
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+      // Restore normal framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // Also restore normal depth buffer
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderFrameBuffer.renderBuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, renderFrameBuffer.width, renderFrameBuffer.height));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
+    }
+  
+    // Given a reduced texture row (histogram data) reduces this on the CPU to a
+    // simple array of 4 angles
+    function getComponentsFromReducedTexture(texture) {
+      // Create a framebuffer backed by the supplied texture
+      var framebuffer;
+      ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
+      // Read the contents of the texture from the framebuffer
+      var data = new ArrayBuffer(512 * 4 * 4); // 4 floats per 4 angle in a 512 row
+      var data_uint8_view = new Uint8Array(data, 0, data.byteLength);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, 512, 1, gl.RGBA, gl.UNSIGNED_BYTE, data_uint8_view));
+      var dataview = new DataView(data);
+      var result_angles = new Float32Array(4);
+      // Reduce data
+      for (i = 0; i < 512; ++i) {
+        result_angles[0] += dataview.getFloat32(i * 4);
+        result_angles[1] += dataview.getFloat32(i * 4 + 1);
+        result_angles[2] += dataview.getFloat32(i * 4 + 2);
+        result_angles[3] += dataview.getFloat32(i * 4 + 3);
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+      return result_angles;
+    }
+
     function drawScene() {
       
       if(textureIsSafeToRender == false)
@@ -702,7 +848,17 @@
       attachTextureToFrameBuffer(histogram_responses_2);
       calculateHistogramDataInFramebuffer(2);
 
-      // TODO!
+      // Now reduce all the responses
+      attachTextureToFrameBuffer(histogram_reduced_row); // Output into this
+
+      histogramReductionInFramebuffer(histogram_responses_0);
+      var histogram_part0 = getComponentsFromReducedTexture(histogram_reduced_row);
+
+      histogramReductionInFramebuffer(histogram_responses_1);
+      var histogram_part1 = getComponentsFromReducedTexture(histogram_reduced_row);
+
+      histogramReductionInFramebuffer(histogram_responses_2);
+      var histogram_part2 = getComponentsFromReducedTexture(histogram_reduced_row);
 
 
 
