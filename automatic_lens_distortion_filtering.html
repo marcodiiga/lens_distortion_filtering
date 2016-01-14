@@ -147,8 +147,8 @@
     float applyThreshold(float value, float threshold) {
       if(value < threshold)
         value = 0.0;
-      else
-        value = 1.0; // Standardized response
+      // else
+      //  value = 1.0; // Standardized response
       return value;
     }
 
@@ -503,11 +503,11 @@
 
       // ~-~-~-~-~-~-~- Init the histogram reduction shader program ~-~-~-~-~-~-~-
 
-      var edgeFragmentShader = getShader(gl, "row-reduction-shader-fs");
-      var edgeVertexShader = getShader(gl, "neuter-shader-vs");
+      var rowReductionFragmentShader = getShader(gl, "row-reduction-shader-fs");
+      var rowReductionVertexShader = getShader(gl, "neuter-shader-vs");
       ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram = gl.createProgram());
-      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, edgeVertexShader));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, edgeFragmentShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, rowReductionVertexShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, rowReductionFragmentShader));
       ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(histogramReductionShaderProgram));
       if (!gl.getProgramParameter(histogramReductionShaderProgram, gl.LINK_STATUS)) {
         alert("Could not initialize shaders");
@@ -821,11 +821,15 @@
       var result_angles = new Float32Array(4);
       // Reduce data
       for (i = 0; i < 512; ++i) {
-        result_angles[0] += data_uint8[i * 4] / 255.0;
-        result_angles[1] += data_uint8[i * 4 + 1] / 255.0;
-        result_angles[2] += data_uint8[i * 4 + 2] / 255.0;
-        result_angles[3] += data_uint8[i * 4 + 3] / 255.0;
+        result_angles[0] += (data_uint8[i * 4]) / 512.0;
+        result_angles[1] += (data_uint8[i * 4 + 1]) / 512.0;
+        result_angles[2] += (data_uint8[i * 4 + 2]) / 512.0;
+        result_angles[3] += (data_uint8[i * 4 + 3]) / 512.0;
       }
+      result_angles[0] /= 512.0;
+      result_angles[1] /= 512.0;
+      result_angles[2] /= 512.0;
+      result_angles[3] /= 512.0;
       ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
       return result_angles;
     }
@@ -963,3 +967,4 @@
   <img id="debug-img" />
 </body>
 </html>
+
