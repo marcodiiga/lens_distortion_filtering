@@ -214,7 +214,7 @@
         
         vec4 p1_rgba = texture2D(input_texture, p1);
         vec4 p2_rgba = texture2D(input_texture, p2);
-        
+
         if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
           // Bail out (the response will be 0.0 for this angle)
           continue;
@@ -301,13 +301,17 @@
     
     void main(void) {
       vec4 angles_result = vec4(0.0, 0.0, 0.0, 0.0);
+
+      float increment = 1.0 / input_texture_size.y;
       
       // Center of texel is at 0.5
-      for(float i = 0.5; i < 1024.0; i += 1.0) { // Another workaround for constant expressions
-        if(!(i < input_texture_size.y))
+      float real_index = increment;
+      for(float i = 0.0; i < 1024.0; i += 0.0) { // Another workaround for constant expressions
+        if(real_index >= input_texture_size.y)
           break;
+        real_index += increment; // Real increment due to workaround
         
-        angles_result += texture2D(input_texture, vec2(pass_TextureCoord.x, i));
+        angles_result += texture2D(input_texture, vec2(pass_TextureCoord.x, real_index));
       }
       gl_FragColor = angles_result;
     }
@@ -591,7 +595,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }      
-      textureId.image.src = "assets/pincushion_distortion.png";
+      textureId.image.src = "assets/testdata.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -719,7 +723,8 @@
 
       // Bind texture to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
+      //ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId)); // DEBUG DEBUG DEBUG
       var sampler2D_loc = gl.getUniformLocation(histogramComputerShaderProgram, "input_texture");
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
 
@@ -821,15 +826,15 @@
       var result_angles = new Float32Array(4);
       // Reduce data
       for (i = 0; i < 512; ++i) {
-        result_angles[0] += (data_uint8[i * 4]) / 512.0;
-        result_angles[1] += (data_uint8[i * 4 + 1]) / 512.0;
-        result_angles[2] += (data_uint8[i * 4 + 2]) / 512.0;
-        result_angles[3] += (data_uint8[i * 4 + 3]) / 512.0;
+        result_angles[0] += (data_uint8[i * 4]) / 255.0;
+        result_angles[1] += (data_uint8[i * 4 + 1]) / 255.0;
+        result_angles[2] += (data_uint8[i * 4 + 2]) / 255.0;
+        result_angles[3] += (data_uint8[i * 4 + 3]) / 255.0;
       }
-      result_angles[0] /= 512.0;
-      result_angles[1] /= 512.0;
-      result_angles[2] /= 512.0;
-      result_angles[3] /= 512.0;
+      //result_angles[0] /= 512.0;
+      //result_angles[1] /= 512.0;
+      //result_angles[2] /= 512.0;
+      //result_angles[3] /= 512.0;
       ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
       return result_angles;
     }
@@ -846,6 +851,55 @@
       // Render and calculate all the histogram responses
       attachTextureToFrameBuffer(histogram_responses_0);
       calculateHistogramDataInFramebuffer(0);
+
+      // DEBUG
+      outputToArray = function (texture) {
+        // Create a framebuffer backed by the texture
+        var framebuffer;
+        ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());
+        ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
+        var width = 512.0;
+        var height = 512.0;
+        // Read the contents of the framebuffer
+        var data = new Uint8Array(width * height * 4);
+        var data_flipped = new Uint8Array(width * height * 4);
+        ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data));
+        // Flip webgl data (usually Y-inverse stored)
+        for (y = 0; y < height; ++y) {
+          for (x = 0; x < width; ++x) {
+            data_flipped[y * width * 4 + x * 4] = data[(height - 1 - y) * width * 4 + x * 4];
+            data_flipped[y * width * 4 + x * 4 + 1] = data[(height - 1 - y) * width * 4 + x * 4 + 1];
+            data_flipped[y * width * 4 + x * 4 + 2] = data[(height - 1 - y) * width * 4 + x * 4 + 2];
+            data_flipped[y * width * 4 + x * 4 + 3] = data[(height - 1 - y) * width * 4 + x * 4 + 3];
+          }
+        }
+
+        var onlydebug = new Uint8Array(width * 3 * 4);
+        for (y = 0; y < 3; ++y) {
+          for (x = 0; x < width; ++x) {
+            onlydebug[y * width * 4 + x * 4] = data_flipped[y * width * 4 + x * 4];
+            onlydebug[y * width * 4 + x * 4 + 1] = data_flipped[y * width * 4 + x * 4 + 1];
+            onlydebug[y * width * 4 + x * 4 + 2] = data_flipped[y * width * 4 + x * 4 + 2];
+            onlydebug[y * width * 4 + x * 4 + 3] = data_flipped[y * width * 4 + x * 4 + 3];
+          }
+        }
+
+        var pp0 = onlydebug[width * 4 * 1 ];
+        var pp01 = onlydebug[width * 4 * 1 + 1];
+        var pp02 = onlydebug[width * 4 * 1 + 2];
+        var pp03 = onlydebug[width * 4 * 1 + 3];
+
+        var pp = onlydebug[width * 4 * 1 + 4];
+        var pp1 = onlydebug[width * 4 * 1 + 5];
+        var pp2 = onlydebug[width * 4 * 1 + 6];
+        var pp3 = onlydebug[width * 4 * 1 + 7];
+
+        ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+        // Break here
+      }
+      outputToArray(histogram_responses_0);
+
       attachTextureToFrameBuffer(histogram_responses_1);
       calculateHistogramDataInFramebuffer(1);
       attachTextureToFrameBuffer(histogram_responses_2);
