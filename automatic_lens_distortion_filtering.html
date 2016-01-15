@@ -263,18 +263,20 @@
         result_g += abs(p1_rgba.g - p2_rgba.g);
         result_b += abs(p1_rgba.b - p2_rgba.b);
 
-        // Sum all responses before thresholding
-        float total_response = abs(result_r + result_g + result_b);
+        // Sum all responses before thresholding and normalize it in the
+        // range [0.0;1.0] (max is 10.5)
+        float total_response = abs(result_r + result_g + result_b) / 10.5;
 
         // Finally store the final response for this angle
+        float threshold = 0.83;
         if(i == 0) {
-          angle_responses[0] = applyThreshold(total_response, 0.5);
+          angle_responses[0] = applyThreshold(total_response, threshold); //< 0
         } else if(i == 1) {
-          angle_responses[1] = applyThreshold(total_response, 0.5);
+          angle_responses[1] = applyThreshold(total_response, threshold);
         } else if(i == 2) {
-          angle_responses[2] = applyThreshold(total_response, 0.5);
+          angle_responses[2] = applyThreshold(total_response, threshold); //< 90
         } else if(i == 3) {
-          angle_responses[3] = applyThreshold(total_response, 0.5);
+          angle_responses[3] = applyThreshold(total_response, threshold);
         }
       }
 
@@ -580,7 +582,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }      
-      textureId.image.src = "assets/testdata.png";
+      textureId.image.src = "assets/calibration_bins.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -863,54 +865,90 @@
       attachTextureToFrameBuffer(histogram_responses_0);
       calculateHistogramDataInFramebuffer(0);
 
-      // DEBUG
-      outputVisualFeedback = function (texture) {
-        // Create a framebuffer backed by the texture
-        var framebuffer;
-        ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());
+      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      var framebuffer;
+      var width = 512.0;
+      var height = 512.0;
+      ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());                  
+      saveTextureDataToArray = function (texture, array) {
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
         ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
-        var width = 512.0;
-        var height = 512.0;
         // Read the contents of the framebuffer
         var data = new Uint8Array(width * height * 4);
-        var data_flipped = new Uint8Array(width * height * 4);
-
         ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data));
         // Flip webgl data (usually Y-inverse stored)
         for (y = 0; y < height; ++y) {
           for (x = 0; x < width; ++x) {
-            data_flipped[y * width * 4 + x * 4]     = data[(height - 1 - y) * width * 4 + x * 4];            
-            data_flipped[y * width * 4 + x * 4 + 1] = 0;
-            data_flipped[y * width * 4 + x * 4 + 2] = 0;
-            data_flipped[y * width * 4 + x * 4 + 3] = 255;
+            array[y * width * 4 + x * 4]     = data[(height - 1 - y) * width * 4 + x * 4];
+            array[y * width * 4 + x * 4 + 1] = data[(height - 1 - y) * width * 4 + x * 4 + 1];
+            array[y * width * 4 + x * 4 + 2] = data[(height - 1 - y) * width * 4 + x * 4 + 2];
+            array[y * width * 4 + x * 4 + 3] = data[(height - 1 - y) * width * 4 + x * 4 + 3];
           }
         }
+        ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, null));
+      }
+      var texture0_data = new Uint8Array(width * height * 4);
+      saveTextureDataToArray(histogram_responses_0, texture0_data);
+      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
 
-        ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+      attachTextureToFrameBuffer(histogram_responses_1);
+      calculateHistogramDataInFramebuffer(1);
 
+      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      var texture1_data = new Uint8Array(width * height * 4);
+      saveTextureDataToArray(histogram_responses_1, texture1_data);
+      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+
+      attachTextureToFrameBuffer(histogram_responses_2);
+      calculateHistogramDataInFramebuffer(2);
+
+      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      var texture2_data = new Uint8Array(width * height * 4);
+      saveTextureDataToArray(histogram_responses_2, texture2_data);
+
+      outputVisualFeedback = function () {        
+        // Only retain angles data
+        var final_data = new Uint8Array(width * height * 4);
+        for (y = 0; y < height; ++y) {
+          for (x = 0; x < width; ++x) {
+            var this_index = y * width * 4 + x * 4;
+            var max_uninteresting_angles = Math.max(texture0_data[this_index + 1], texture0_data[this_index + 2],
+              texture0_data[this_index + 3], texture1_data[this_index], texture1_data[this_index + 1],
+              texture1_data[this_index + 3], texture2_data[this_index], texture2_data[this_index + 1],
+              texture2_data[this_index + 2], texture2_data[this_index + 3], 0);
+            if (max_uninteresting_angles > 0) {
+              final_data[this_index] = max_uninteresting_angles; // Red
+              final_data[this_index + 1] = 0;
+              final_data[this_index + 2] = 0;
+              final_data[this_index + 3] = 255;
+            } else {
+              var max_interesting_angles = Math.max(texture0_data[this_index], texture1_data[this_index + 2], 0);
+              final_data[this_index] = 0; 
+              final_data[this_index + 1] = max_interesting_angles; // Green
+              final_data[this_index + 2] = 0;
+              final_data[this_index + 3] = 255;
+            }
+          }
+        }        
         // Create a 2D canvas to store the result 
         var canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
         var context = canvas.getContext('2d');
-
         // Copy the pixels to a 2D canvas
         var imageData = context.createImageData(width, height);
-        imageData.data.set(data_flipped);
+        imageData.data.set(final_data);
         context.putImageData(imageData, 0, 0);
-
         return canvas.toDataURL();
       }
+
       var img = document.getElementById("debug-img");
-      img.src = outputVisualFeedback(histogram_responses_0);
+      img.src = outputVisualFeedback();
+      ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
 
-      return;
 
-      attachTextureToFrameBuffer(histogram_responses_1);
-      calculateHistogramDataInFramebuffer(1);
-      attachTextureToFrameBuffer(histogram_responses_2);
-      calculateHistogramDataInFramebuffer(2);
+      
 
       // Now reduce all the responses
       attachTextureToFrameBuffer(histogram_reduced_row); // Output into this
@@ -925,6 +963,20 @@
       var histogram_part2 = getComponentsFromReducedTexture(histogram_reduced_row);
 
       console.log("Reduction done\n");
+      var ptag = document.getElementById("debug-paragraph");
+      ptag.innerText =
+        "0°(" + histogram_part0[0] + ") " +
+        "15°(" + histogram_part0[1] + ") " +
+        "30°(" + histogram_part0[2] + ") " +
+        "45°(" + histogram_part0[3] + ") " +
+        "60°(" + histogram_part1[0] + ") " +
+        "75°(" + histogram_part1[1] + ") " +
+        "90°(" + histogram_part1[2] + ") " +
+        "105°(" + histogram_part1[3] + ") " +
+        "120°(" + histogram_part2[0] + ") " +
+        "135°(" + histogram_part2[1] + ") " +
+        "150°(" + histogram_part2[2] + ") " +
+        "165°(" + histogram_part2[3] + ") ";
 
 
       // Debug
@@ -1020,6 +1072,7 @@
   </div>
   <br />
   <img id="debug-img" />
+  <p id="debug-paragraph"></p>
   <a id="debug-anchor" href="">Download first texture histogram as text file</a>
 </body>
 </html>
