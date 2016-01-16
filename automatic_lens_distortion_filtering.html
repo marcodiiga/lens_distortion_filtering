@@ -380,7 +380,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.clearColor(0.0, 0.0, 0.0, 1.0));
       ctx = WebGLDebugUtils.makeDebugContext(gl.enable(gl.DEPTH_TEST));
       
-      paintLoop();
+      //paintLoop();
     }
     
     // Geometric and quad rendering data
@@ -623,7 +623,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }      
-      textureId.image.src = "assets/calibration_bins_ok.png";
+      textureId.image.src = "assets/pincushion_distortion.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -751,8 +751,8 @@
 
       // Bind texture to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
-      //ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId)); // DEBUG DEBUG DEBUG
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
+      // ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId)); // DEBUG DEBUG DEBUG
       var sampler2D_loc = gl.getUniformLocation(histogramComputerShaderProgram, "input_texture");
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
 
@@ -893,10 +893,10 @@
       return result_angles;
     }
 
-    function drawScene() {
+    function estimateHistogram() {
       
       if(textureIsSafeToRender == false)
-        return; // Still can't render stuff if the texture hasn't been loaded yet
+        return []; // Still can't render stuff if the texture hasn't been loaded yet
 
       // First render an undistorted image in the framebuffer texture
       attachTextureToFrameBuffer(undistortionTexture);
@@ -1052,12 +1052,77 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+
+      // Return complete histogram
+      var histogram = [];
+      Array.prototype.push.apply(histogram, histogram_part0);
+      Array.prototype.push.apply(histogram, histogram_part1);
+      Array.prototype.push.apply(histogram, histogram_part2);
+      return histogram;
     }
     
-    function paintLoop() {    
+    function paintLoop() {
       requestAnimFrame(paintLoop);
-      drawScene();      
+      drawScene();
     }
+
+    /**
+     * The main calibration routine     
+     */
+    function calibration() {
+
+      var best_score_found = -1000.0;
+      var best_alpha = 0;
+
+      // Start a series of calibrations by providing undistortion parameters
+
+      var alpha = 1;
+
+      function calibrationSummary() {
+        alphax = (best_alpha * 0.01) * maximum_alpha;
+        alphay = alphax;
+        statusLog("Calibration done, best estimation for parameter " + best_alpha);
+        estimateHistogram();
+      }
+
+      function calibrateForAlpha() {
+        statusLog("Calibrating distortion filtering [" + alpha + "%]...");
+        alphax = (alpha * 0.01) * maximum_alpha;
+        alphay = alphax;
+
+        var histogram = estimateHistogram();
+
+        // Assign a score to this histogram
+        var score = 3.0 * histogram[0] +
+                    -0.3 * histogram[1] +
+                    -1.0 * histogram[2] +
+                    -1.0 * histogram[3] +
+                    -1.0 * histogram[4] +
+                    -0.1 * histogram[5] +
+                    3.0 * histogram[6] +
+                    -0.1 * histogram[7] +
+                    -1.0 * histogram[8] +
+                    -1.0 * histogram[9] +
+                    -1.0 * histogram[10] +
+                    -0.3 * histogram[11];
+
+        if (score > best_score_found) {
+          statusLog("New best score found: " + score + " [" + alpha + "%]...");
+          best_score_found = score;
+          best_alpha = alpha;
+        }
+
+        ++alpha;
+
+        if (alpha < 100)
+          setTimeout(calibrateForAlpha, 0.8);
+        else
+          calibrationSummary();
+      }
+
+      calibrateForAlpha();      
+    }    
     
     // ~-~-~-~-~-~-~-~-~- UI related handling routines ~-~-~-~-~-~-~-~-~-
     
@@ -1085,11 +1150,23 @@
         } break;
       }
     }
+
+    function statusLog(text) {
+      document.getElementById("text-status").innerText = text;
+    }
+
+    function startCalibration() {
+      document.getElementById("calib_btn").hidden = true;
+      calibration();
+    }
+
     // ~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-
         
   </script>
 </head>
 <body onload="webGLStart();">
+  <button id="calib_btn" onclick="startCalibration();">Start calibration</button>
+  <p id="text-status"></p>
   <div style="padding: 10px;">
     <div style="float: left;">
       <!-- WARNING: KEEP THE DIMENSIONS UNDER 512x512, OTHERWISE A BIGGER TEXTURE IS NEEDED -->
