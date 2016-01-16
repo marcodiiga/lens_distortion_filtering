@@ -201,6 +201,15 @@
         // Kernel is vertically oversampled on left/right
         vec2 p2r = pass_TextureCoord + du - (2.0 * dv); // Texture texel on the top of position [2]
         vec2 p2l = pass_TextureCoord - du - (2.0 * dv); // ditto on the top of 0
+
+        vec2 p3r = pass_TextureCoord + du - (3.0 * dv); // Texture texel on the top of position [2]
+        vec2 p3l = pass_TextureCoord - du - (3.0 * dv); // ditto on the top of 0
+
+        vec2 p4r = pass_TextureCoord + du - (4.0 * dv); // Texture texel on the top of position [2]
+        vec2 p4l = pass_TextureCoord - du - (4.0 * dv); // ditto on the top of 0
+
+        vec2 p5r = pass_TextureCoord + du - (5.0 * dv); // Texture texel on the top of position [2]
+        vec2 p5l = pass_TextureCoord - du - (5.0 * dv); // ditto on the top of 0
         
         /*if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
           // Bail out (the response will be 0.0 for this angle)
@@ -211,14 +220,23 @@
         vec4 p1l_rgba = texture2D(input_texture, p1l);
         vec4 p2r_rgba = texture2D(input_texture, p2r);
         vec4 p2l_rgba = texture2D(input_texture, p2l);
+        vec4 p3r_rgba = texture2D(input_texture, p3r);
+        vec4 p3l_rgba = texture2D(input_texture, p3l);
+        vec4 p4r_rgba = texture2D(input_texture, p4r);
+        vec4 p4l_rgba = texture2D(input_texture, p4l);
+        vec4 p5r_rgba = texture2D(input_texture, p5r);
+        vec4 p5l_rgba = texture2D(input_texture, p5l);
 
         /*if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
           // Bail out (the response will be 0.0 for this angle)
           continue;
         }*/
 
-        result += abs(p1r_rgba.xyz - p1l_rgba.xyz);
-        result += abs(p2r_rgba.xyz - p2l_rgba.xyz);
+        result += abs(p1r_rgba.xyz - p1l_rgba.xyz) * p1r_rgba.a * p1l_rgba.a;
+        result += abs(p2r_rgba.xyz - p2l_rgba.xyz) * p2r_rgba.a * p2l_rgba.a;
+        result += abs(p3r_rgba.xyz - p3l_rgba.xyz) * p3r_rgba.a * p3l_rgba.a;
+        result += abs(p4r_rgba.xyz - p4l_rgba.xyz) * p4r_rgba.a * p4l_rgba.a;
+        result += abs(p5r_rgba.xyz - p5l_rgba.xyz) * p5r_rgba.a * p5l_rgba.a;
 
         // << Row 2 >>
 
@@ -238,9 +256,9 @@
           continue;
         }*/
 
-        result += 1.5 * abs(p1r_rgba.xyz - p1l_rgba.xyz);
+        result += 1.5 * abs(p1r_rgba.xyz - p1l_rgba.xyz) * p1r_rgba.a * p1l_rgba.a;
 
-        // << Row 2 >>
+        // << Row 3 >>
 
         p1r = pass_TextureCoord + du + dv; // Texture texel to be multiplied with kernel position 8
         p1l = pass_TextureCoord - du + dv; // ditto with ker pos 6
@@ -248,7 +266,17 @@
         // Kernel is vertically oversampled on left/right
         p2r = pass_TextureCoord + du + (2.0 * dv); // Texture texel on the bottom of position [2]
         p2l = pass_TextureCoord - du + (2.0 * dv); // ditto on the bottom of [0]
-        
+
+        p3r = pass_TextureCoord + du + (3.0 * dv); // Texture texel on the bottom of position [2]
+        p3l = pass_TextureCoord - du + (3.0 * dv); // ditto on the bottom of [0]
+
+        p4r = pass_TextureCoord + du + (4.0 * dv); // Texture texel on the bottom of position [2]
+        p4l = pass_TextureCoord - du + (4.0 * dv); // ditto on the bottom of [0]
+      
+        p5r = pass_TextureCoord + du + (5.0 * dv); // Texture texel on the bottom of position [2]
+        p5l = pass_TextureCoord - du + (5.0 * dv); // ditto on the bottom of [0]    
+
+
         /*if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
           // Bail out (the response will be 0.0 for this angle)
           continue;
@@ -258,6 +286,12 @@
         p1l_rgba = texture2D(input_texture, p1l);
         p2r_rgba = texture2D(input_texture, p2r);
         p2l_rgba = texture2D(input_texture, p2l);
+        p3r_rgba = texture2D(input_texture, p3r);
+        p3l_rgba = texture2D(input_texture, p3l);
+        p4r_rgba = texture2D(input_texture, p4r);
+        p4l_rgba = texture2D(input_texture, p4l);
+        p5r_rgba = texture2D(input_texture, p5r);
+        p5l_rgba = texture2D(input_texture, p5l);
         
         /*if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
           // Bail out (the response will be 0.0 for this angle)
@@ -266,13 +300,16 @@
 
         result += abs(p1r_rgba.xyz - p1l_rgba.xyz) * p1r_rgba.a * p1l_rgba.a;
         result += abs(p2r_rgba.xyz - p2l_rgba.xyz) * p2r_rgba.a * p2l_rgba.a;
+        result += abs(p3r_rgba.xyz - p3l_rgba.xyz) * p3r_rgba.a * p3l_rgba.a;
+        result += abs(p4r_rgba.xyz - p4l_rgba.xyz) * p4r_rgba.a * p4l_rgba.a;
+        result += abs(p5r_rgba.xyz - p5l_rgba.xyz) * p5r_rgba.a * p5l_rgba.a;
 
         // Sum all responses before thresholding and normalize it in the
         // range [0.0;1.0] (max is 10.5)
-        float total_response = abs(result.x + result.y + result.z) / 10.5;
+        float total_response = abs(result.x + result.y + result.z) / 33.5;
 
         // Finally store the final response for this angle
-        float threshold = 0.6;
+        float threshold = 0.57;
         if(i == 0) {
           angle_responses[0] = applyThreshold(total_response, threshold); //< 0
         } else if(i == 1) {
@@ -586,7 +623,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }      
-      textureId.image.src = "assets/calibration_bins.png";
+      textureId.image.src = "assets/calibration_bins_ok.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
