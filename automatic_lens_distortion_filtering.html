@@ -9,7 +9,7 @@
 
   <script id="debug-fs" type="x-shader/x-fragment">
     // Debug fs
-    precision mediump float;
+    precision highp float;
     uniform sampler2D texture_diffuse;
     varying vec4 pass_Color;
     varying vec2 pass_TextureCoord;
@@ -40,7 +40,7 @@
   <script id="undistortion-shader-fs" type="x-shader/x-fragment">
     // Renders to the target framebuffer an undistorted version of the input
     // texture via an approximate radial undistortion filtering
-    precision mediump float;
+    precision highp float;
     
     uniform sampler2D texture_diffuse;
     uniform vec2 image_dimensions;
@@ -123,7 +123,7 @@
   <!-- Histogram computer shader -->
   <script id="histogram-computer-shader-fs" type="x-shader/x-fragment">
     // Computes part of an edge-response histogram in a texture
-    precision mediump float;
+    precision highp float;
     
     uniform sampler2D input_texture;
     uniform vec2 input_texture_size;
@@ -375,7 +375,7 @@
   <!-- Reduction shader -->
   <script id="row-reduction-shader-fs" type="x-shader/x-fragment">
     // Reduces a WxH texture data to a single Wx1 row (4 channels each pixel)
-    precision mediump float;
+    precision highp float;
     
     uniform sampler2D input_texture;
     uniform vec2 input_texture_size;
@@ -669,7 +669,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }      
-      textureId.image.src = "assets/pincushion_distortion_45.png";
+      textureId.image.src = "assets/grid.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -805,7 +805,7 @@
       // Fill the angle increments for the histogram computer shader      
       var vectors = new Float32Array(4 * 2); // 4 vec2 increments, (see fragment shader)
       var angle_increment_degrees = 15.0;
-      for (i = response_part * 4; i < response_part * 4 + 4; i++) {
+      for (i = response_part * 4; i < (response_part * 4) + 4; i++) {
         var angle_radians = (i * angle_increment_degrees) / 180.0 * Math.PI;
 
         vectors[(i - response_part * 4) * 2] = Math.cos(angle_radians) / 512.0;
