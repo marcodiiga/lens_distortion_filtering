@@ -93,6 +93,11 @@
             
         texture_color.a = alpha;
 
+        texture_color.r = alpha;
+        texture_color.g = alpha;
+        texture_color.b = alpha;
+        texture_color.a = 1.0;
+
         gl_FragColor = texture_color; // Finally store the result
       } else
         gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); // alpha is set to zero, i.e. don't compute
@@ -185,7 +190,7 @@
     
         result = vec3(0.0, 0.0, 0.0);
 
-        vec2 du = rotation_du[i];
+        vec2 du = rotation_du[i];    
         vec2 dv = vec2(du.y, -du.x); // Obtain the perpendicular vector
 
         //
@@ -211,6 +216,12 @@
 
         vec2 p5r = pass_TextureCoord + du - (5.0 * dv); // Texture texel on the top of position [2]
         vec2 p5l = pass_TextureCoord - du - (5.0 * dv); // ditto on the top of 0
+
+        vec2 p6r = pass_TextureCoord + du - (6.0 * dv);
+        vec2 p6l = pass_TextureCoord - du - (6.0 * dv);   
+
+        vec2 p7r = pass_TextureCoord + du - (7.0 * dv);
+        vec2 p7l = pass_TextureCoord - du - (7.0 * dv);
         
         /*if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
           // Bail out (the response will be 0.0 for this angle)
@@ -227,6 +238,10 @@
         vec4 p4l_rgba = texture2D(input_texture, p4l);
         vec4 p5r_rgba = texture2D(input_texture, p5r);
         vec4 p5l_rgba = texture2D(input_texture, p5l);
+        vec4 p6r_rgba = texture2D(input_texture, p6r);
+        vec4 p6l_rgba = texture2D(input_texture, p6l);
+        vec4 p7r_rgba = texture2D(input_texture, p7r);
+        vec4 p7l_rgba = texture2D(input_texture, p7l);
 
         /*if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
           // Bail out (the response will be 0.0 for this angle)
@@ -238,6 +253,8 @@
         result += abs(p3r_rgba.xyz - p3l_rgba.xyz) * p3r_rgba.a * p3l_rgba.a;
         result += abs(p4r_rgba.xyz - p4l_rgba.xyz) * p4r_rgba.a * p4l_rgba.a;
         result += abs(p5r_rgba.xyz - p5l_rgba.xyz) * p5r_rgba.a * p5l_rgba.a;
+        result += abs(p6r_rgba.xyz - p6l_rgba.xyz) * p6r_rgba.a * p6l_rgba.a;
+        result += abs(p7r_rgba.xyz - p7l_rgba.xyz) * p7r_rgba.a * p7l_rgba.a;
 
         // << Row 2 >>
 
@@ -277,6 +294,12 @@
         p5r = pass_TextureCoord + du + (5.0 * dv); // Texture texel on the bottom of position [2]
         p5l = pass_TextureCoord - du + (5.0 * dv); // ditto on the bottom of [0]    
 
+        p6r = pass_TextureCoord + du + (6.0 * dv);
+        p6l = pass_TextureCoord - du + (6.0 * dv);
+
+        p7r = pass_TextureCoord + du + (7.0 * dv);
+        p7l = pass_TextureCoord - du + (7.0 * dv);
+
 
         /*if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
           // Bail out (the response will be 0.0 for this angle)
@@ -293,6 +316,10 @@
         p4l_rgba = texture2D(input_texture, p4l);
         p5r_rgba = texture2D(input_texture, p5r);
         p5l_rgba = texture2D(input_texture, p5l);
+        p6r_rgba = texture2D(input_texture, p6r);
+        p6l_rgba = texture2D(input_texture, p6l);
+        p7r_rgba = texture2D(input_texture, p7r);
+        p7l_rgba = texture2D(input_texture, p7l);
         
         /*if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
           // Bail out (the response will be 0.0 for this angle)
@@ -304,13 +331,15 @@
         result += abs(p3r_rgba.xyz - p3l_rgba.xyz) * p3r_rgba.a * p3l_rgba.a;
         result += abs(p4r_rgba.xyz - p4l_rgba.xyz) * p4r_rgba.a * p4l_rgba.a;
         result += abs(p5r_rgba.xyz - p5l_rgba.xyz) * p5r_rgba.a * p5l_rgba.a;
+        result += abs(p6r_rgba.xyz - p6l_rgba.xyz) * p6r_rgba.a * p6l_rgba.a;
+        result += abs(p7r_rgba.xyz - p7l_rgba.xyz) * p7r_rgba.a * p7l_rgba.a;
 
         // Sum all responses before thresholding and normalize it in the
-        // range [0.0;1.0] (max is 33.5)
-        float total_response = abs(result.x + result.y + result.z) / 33.5;
+        // range [0.0;1.0] (max is 34.5)
+        float total_response = abs(result.x + result.y + result.z) / 46.5;
 
         // Finally store the final response for this angle
-        float threshold = 0.57;
+        float threshold = 0.67;
         if(i == 0) {
           angle_responses[0] = applyThreshold(total_response, threshold); //< 0
         } else if(i == 1) {
@@ -1008,22 +1037,8 @@
       var histogram_part2 = getComponentsFromReducedTexture(histogram_reduced_row);
 
       console.log("Reduction done\n");
-      var ptag = document.getElementById("debug-paragraph");
-      ptag.innerText =
-        "0°(" + histogram_part0[0] + ") " +
-        "15°(" + histogram_part0[1] + ") " +
-        "30°(" + histogram_part0[2] + ") " +
-        "45°(" + histogram_part0[3] + ") " +
-        "60°(" + histogram_part1[0] + ") " +
-        "75°(" + histogram_part1[1] + ") " +
-        "90°(" + histogram_part1[2] + ") " +
-        "105°(" + histogram_part1[3] + ") " +
-        "120°(" + histogram_part2[0] + ") " +
-        "135°(" + histogram_part2[1] + ") " +
-        "150°(" + histogram_part2[2] + ") " +
-        "165°(" + histogram_part2[3] + ") ";
 
-
+      
       // Debug
       //var img = document.getElementById("debug-img");
       //img.src = createImageFromTexture(gl, edgeDetectionTexture, 512, 512);
@@ -1063,6 +1078,27 @@
       Array.prototype.push.apply(histogram, histogram_part0);
       Array.prototype.push.apply(histogram, histogram_part1);
       Array.prototype.push.apply(histogram, histogram_part2);
+
+      // Scale up these values to indicate how many pixels responded to a given angle
+      for (var i = 0; i < histogram.length; ++i) {
+        histogram[i] = 512.0 * 512.0 * histogram[i];
+      }
+
+      var ptag = document.getElementById("debug-paragraph");
+      ptag.innerText =
+        "0°(" + histogram[0] + ") " +
+        "15°(" + histogram[1] + ") " +
+        "30°(" + histogram[2] + ") " +
+        "45°(" + histogram[3] + ") " +
+        "60°(" + histogram[4] + ") " +
+        "75°(" + histogram[5] + ") " +
+        "90°(" + histogram[6] + ") " +
+        "105°(" + histogram[7] + ") " +
+        "120°(" + histogram[8] + ") " +
+        "135°(" + histogram[9] + ") " +
+        "150°(" + histogram[10] + ") " +
+        "165°(" + histogram[11] + ") ";
+
       return histogram;
     }
     
@@ -1096,20 +1132,16 @@
         alphay = alphax;
 
         var histogram = estimateHistogram();
+        if (histogram.length == 0)
+          calibrateForAlpha(); // Wait for the images to be fully loaded
 
         // Assign a score to this histogram
-        var score = 1.0 * histogram[0] +
-                    -0.2 * histogram[1] +
-                    -10 * histogram[2] +
-                    -10 * histogram[3] +
-                    -10 * histogram[4] +
-                    -0.2 * histogram[5] +
-                    1.0 * histogram[6] +
-                    -0.2 * histogram[7] +
-                    -10 * histogram[8] +
-                    -10 * histogram[9] +
-                    -10 * histogram[10] +
-                    -0.2 * histogram[11];
+        var score = Math.max.apply(Math, histogram) - Math.min.apply(Math, histogram);
+
+        //if (alpha == 50) {
+        //  statusLog("[DEBUG] diff is: " + Math.max.apply(Math, histogram) + " - " + Math.min.apply(Math, histogram) +
+        //    " = " + score);
+       // }
 
         if (score > best_score_found) {
           statusLog("New best score found: " + score + " [" + alpha + "%]...");
@@ -1125,7 +1157,7 @@
           calibrationSummary();
       }
 
-      calibrateForAlpha();      
+      calibrateForAlpha();
     }    
     
     // ~-~-~-~-~-~-~-~-~- UI related handling routines ~-~-~-~-~-~-~-~-~-
