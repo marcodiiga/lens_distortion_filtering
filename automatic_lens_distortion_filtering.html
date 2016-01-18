@@ -127,6 +127,7 @@
     
     uniform sampler2D input_texture;
     uniform vec2 input_texture_size;
+    uniform vec2 texel_increment;
 
     //
     // Rotation vectors for the kernel. We're interested into covering a 360°
@@ -172,12 +173,12 @@
         return false;
     }
 
-    void main(void) {      
+    void main(void) {
      
       vec4 angle_responses = vec4(0.0, 0.0, 0.0, 0.0);
 
       // Channel responses for this angle (alpha is not used)
-      vec3 result;     
+      vec3 result;
 
       // Loop over all the rotation vectors (equivalent to rotating the kernel)
       for(int i = 0; i < 4; ++i) {
@@ -305,7 +306,7 @@
         result += abs(p5r_rgba.xyz - p5l_rgba.xyz) * p5r_rgba.a * p5l_rgba.a;
 
         // Sum all responses before thresholding and normalize it in the
-        // range [0.0;1.0] (max is 10.5)
+        // range [0.0;1.0] (max is 33.5)
         float total_response = abs(result.x + result.y + result.z) / 33.5;
 
         // Finally store the final response for this angle
@@ -340,20 +341,18 @@
       vec4 angles_result = vec4(0.0, 0.0, 0.0, 0.0);
 
       float increment = 1.0 / input_texture_size.y;
-      
-      // Notice that center of texel is at 0.5
-      float real_index = 0.0;
-      for(float i = 0.0; i < 1024.0; i += 0.0) { // Another workaround for constant expressions
-        if(real_index >= input_texture_size.y)
-          break;
-        real_index += increment; // Real increment due to workaround
-        
-        angles_result += texture2D(input_texture, vec2(pass_TextureCoord.x, real_index));
+
+      for(float i = 0.0; i < 1024.0; i += 1.0) {
+        if(i > input_texture_size.y) // Another workaround for constant expressions
+          break;    
+
+        angles_result += texture2D(input_texture, vec2(pass_TextureCoord.x, increment * i ));
       }
-      gl_FragColor.x = angles_result.x / 512.0;
-      gl_FragColor.y = angles_result.y / 512.0;
-      gl_FragColor.z = angles_result.z / 512.0;
-      gl_FragColor.w = angles_result.w / 512.0;
+
+      gl_FragColor.x = angles_result.x / input_texture_size.y;
+      gl_FragColor.y = angles_result.y / input_texture_size.y;
+      gl_FragColor.z = angles_result.z / input_texture_size.y;
+      gl_FragColor.w = angles_result.w / input_texture_size.y;
     }
     
   </script>
@@ -531,7 +530,8 @@
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.pMatrixUniform = gl.getUniformLocation(histogramComputerShaderProgram, "uPMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.mvMatrixUniform = gl.getUniformLocation(histogramComputerShaderProgram, "uMVMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.texture_size = gl.getUniformLocation(histogramComputerShaderProgram, "input_texture_size"));
-      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.rotation_du = gl.getUniformLocation(histogramComputerShaderProgram, "rotation_du"));      
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.rotation_du = gl.getUniformLocation(histogramComputerShaderProgram, "rotation_du"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.texel_increment = gl.getUniformLocation(histogramComputerShaderProgram, "texel_increment"));
 
       // ~-~-~-~-~-~-~- Init the histogram reduction shader program ~-~-~-~-~-~-~-
 
@@ -766,6 +766,10 @@
         vectors[(i - response_part * 4) * 2 + 1] = Math.sin(angle_radians) / 512.0;
       }
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.rotation_du, vectors));
+
+      // Fill texel increments
+      texel_increments = [1.0 / 512.0, 1.0 / 512.0];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.texel_increment, texel_increments));
 
       // Bind vertex data and set vertex attributes (as from a VAO)
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
@@ -1094,18 +1098,18 @@
         var histogram = estimateHistogram();
 
         // Assign a score to this histogram
-        var score = 3.0 * histogram[0] +
-                    -0.3 * histogram[1] +
-                    -1.0 * histogram[2] +
-                    -1.0 * histogram[3] +
-                    -1.0 * histogram[4] +
-                    -0.1 * histogram[5] +
-                    3.0 * histogram[6] +
-                    -0.1 * histogram[7] +
-                    -1.0 * histogram[8] +
-                    -1.0 * histogram[9] +
-                    -1.0 * histogram[10] +
-                    -0.3 * histogram[11];
+        var score = 1.0 * histogram[0] +
+                    -0.2 * histogram[1] +
+                    -10 * histogram[2] +
+                    -10 * histogram[3] +
+                    -10 * histogram[4] +
+                    -0.2 * histogram[5] +
+                    1.0 * histogram[6] +
+                    -0.2 * histogram[7] +
+                    -10 * histogram[8] +
+                    -10 * histogram[9] +
+                    -10 * histogram[10] +
+                    -0.2 * histogram[11];
 
         if (score > best_score_found) {
           statusLog("New best score found: " + score + " [" + alpha + "%]...");
