@@ -93,11 +93,6 @@
             
         texture_color.a = alpha;
 
-        texture_color.r = alpha;
-        texture_color.g = alpha;
-        texture_color.b = alpha;
-        texture_color.a = 1.0;
-
         gl_FragColor = texture_color; // Finally store the result
       } else
         gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); // alpha is set to zero, i.e. don't compute
@@ -248,13 +243,21 @@
           continue;
         }*/
 
-        result += abs(p1r_rgba.xyz - p1l_rgba.xyz) * p1r_rgba.a * p1l_rgba.a;
-        result += abs(p2r_rgba.xyz - p2l_rgba.xyz) * p2r_rgba.a * p2l_rgba.a;
-        result += abs(p3r_rgba.xyz - p3l_rgba.xyz) * p3r_rgba.a * p3l_rgba.a;
-        result += abs(p4r_rgba.xyz - p4l_rgba.xyz) * p4r_rgba.a * p4l_rgba.a;
-        result += abs(p5r_rgba.xyz - p5l_rgba.xyz) * p5r_rgba.a * p5l_rgba.a;
-        result += abs(p6r_rgba.xyz - p6l_rgba.xyz) * p6r_rgba.a * p6l_rgba.a;
-        result += abs(p7r_rgba.xyz - p7l_rgba.xyz) * p7r_rgba.a * p7l_rgba.a;
+        float alpha_factor = p1r_rgba.a * p1l_rgba.a * 
+                             p2r_rgba.a * p2l_rgba.a *
+                             p3r_rgba.a * p3l_rgba.a *
+                             p4r_rgba.a * p4l_rgba.a *
+                             p5r_rgba.a * p5l_rgba.a *
+                             p6r_rgba.a * p6l_rgba.a *
+                             p7r_rgba.a * p7l_rgba.a;
+
+        result += abs(p1r_rgba.xyz - p1l_rgba.xyz);
+        result += abs(p2r_rgba.xyz - p2l_rgba.xyz);
+        result += abs(p3r_rgba.xyz - p3l_rgba.xyz);
+        result += abs(p4r_rgba.xyz - p4l_rgba.xyz);
+        result += abs(p5r_rgba.xyz - p5l_rgba.xyz);
+        result += abs(p6r_rgba.xyz - p6l_rgba.xyz);
+        result += abs(p7r_rgba.xyz - p7l_rgba.xyz);
 
         // << Row 2 >>
 
@@ -274,7 +277,8 @@
           continue;
         }*/
 
-        result += 1.5 * abs(p1r_rgba.xyz - p1l_rgba.xyz) * p1r_rgba.a * p1l_rgba.a;
+        alpha_factor *= p1r_rgba.a * p1l_rgba.a;
+        result += 1.5 * abs(p1r_rgba.xyz - p1l_rgba.xyz);
 
         // << Row 3 >>
 
@@ -326,20 +330,33 @@
           continue;
         }*/
 
-        result += abs(p1r_rgba.xyz - p1l_rgba.xyz) * p1r_rgba.a * p1l_rgba.a;
-        result += abs(p2r_rgba.xyz - p2l_rgba.xyz) * p2r_rgba.a * p2l_rgba.a;
-        result += abs(p3r_rgba.xyz - p3l_rgba.xyz) * p3r_rgba.a * p3l_rgba.a;
-        result += abs(p4r_rgba.xyz - p4l_rgba.xyz) * p4r_rgba.a * p4l_rgba.a;
-        result += abs(p5r_rgba.xyz - p5l_rgba.xyz) * p5r_rgba.a * p5l_rgba.a;
-        result += abs(p6r_rgba.xyz - p6l_rgba.xyz) * p6r_rgba.a * p6l_rgba.a;
-        result += abs(p7r_rgba.xyz - p7l_rgba.xyz) * p7r_rgba.a * p7l_rgba.a;
+        alpha_factor *=  p1r_rgba.a * p1l_rgba.a * 
+                         p2r_rgba.a * p2l_rgba.a *
+                         p3r_rgba.a * p3l_rgba.a *
+                         p4r_rgba.a * p4l_rgba.a *
+                         p5r_rgba.a * p5l_rgba.a *
+                         p6r_rgba.a * p6l_rgba.a *
+                         p7r_rgba.a * p7l_rgba.a;
+
+        result += abs(p1r_rgba.xyz - p1l_rgba.xyz);
+        result += abs(p2r_rgba.xyz - p2l_rgba.xyz);
+        result += abs(p3r_rgba.xyz - p3l_rgba.xyz);
+        result += abs(p4r_rgba.xyz - p4l_rgba.xyz);
+        result += abs(p5r_rgba.xyz - p5l_rgba.xyz);
+        result += abs(p6r_rgba.xyz - p6l_rgba.xyz);
+        result += abs(p7r_rgba.xyz - p7l_rgba.xyz);
+
+
+        // Apply the alpha factors (1.0 if everything is included into the
+        // computation, 0.0 if something triggered a no-compute for this kernel)
+        result *= alpha_factor;
 
         // Sum all responses before thresholding and normalize it in the
-        // range [0.0;1.0] (max is 34.5)
+        // range [0.0;1.0] (max is 46.5)
         float total_response = abs(result.x + result.y + result.z) / 46.5;
 
         // Finally store the final response for this angle
-        float threshold = 0.67;
+        float threshold = 0.8;
         if(i == 0) {
           angle_responses[0] = applyThreshold(total_response, threshold); //< 0
         } else if(i == 1) {
@@ -652,7 +669,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }      
-      textureId.image.src = "assets/pincushion_distortion.png";
+      textureId.image.src = "assets/pincushion_distortion_45.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -670,10 +687,10 @@
       ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_2 = gl.createTexture());
       
       var setTextureSize = function () {
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
         ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
                                                renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
       }
 
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_0));
@@ -874,9 +891,11 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
 
       // Cleanup
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));      
 
       // Restore normal framebuffer
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
