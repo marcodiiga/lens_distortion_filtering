@@ -126,8 +126,7 @@
     precision highp float;
     
     uniform sampler2D input_texture;
-    uniform vec2 input_texture_size;
-    uniform vec2 texel_increment;
+    uniform vec2 input_texture_size;    
 
     //
     // Rotation vectors for the kernel. We're interested into covering a 360°
@@ -138,6 +137,7 @@
     // components) on the CPU and then pass it to the shader here.
     //
     uniform vec2 rotation_du[4];
+    uniform vec4 response_boost;
     
     varying vec4 pass_Color; // Unused/for debugging purposes
     varying vec2 pass_TextureCoord;
@@ -355,8 +355,12 @@
         // range [0.0;1.0] (max is 46.5)
         float total_response = abs(result.x + result.y + result.z) / 46.5;
 
+        // Apply the appropriate response boost (e.g. 45° degrees must be boosted with
+        // respect to 0° degrees lines)
+        total_response *= response_boost[i];
+
         // Finally store the final response for this angle
-        float threshold = 0.6;
+        float threshold = 0.82;
         if(i == 0) {
           angle_responses[0] = applyThreshold(total_response, threshold); //< 0
         } else if(i == 1) {
@@ -577,7 +581,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.mvMatrixUniform = gl.getUniformLocation(histogramComputerShaderProgram, "uMVMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.texture_size = gl.getUniformLocation(histogramComputerShaderProgram, "input_texture_size"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.rotation_du = gl.getUniformLocation(histogramComputerShaderProgram, "rotation_du"));
-      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.texel_increment = gl.getUniformLocation(histogramComputerShaderProgram, "texel_increment"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.response_boost = gl.getUniformLocation(histogramComputerShaderProgram, "response_boost"));
 
       // ~-~-~-~-~-~-~- Init the histogram reduction shader program ~-~-~-~-~-~-~-
 
@@ -669,7 +673,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }      
-      textureId.image.src = "assets/grid.png";
+      textureId.image.src = "assets/pincushion_distortion_45_2.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -815,9 +819,29 @@
       }
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.rotation_du, vectors));
 
-      // Fill texel increments
-      texel_increments = [1.0 / 512.0, 1.0 / 512.0];
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.texel_increment, texel_increments));
+      // Fill response boost
+      var response_boost = [0.0, 0.0, 0.0, 0.0];
+      switch(response_part) {
+        case 0: {
+          response_boost[0] = 1.0;
+          response_boost[1] = 1.0;
+          response_boost[2] = 1.0;
+          response_boost[3] = 1.5; // 45°
+        } break;
+        case 1: {
+          response_boost[0] = 1.0;
+          response_boost[1] = 1.0;
+          response_boost[2] = 1.0;
+          response_boost[3] = 1.0;
+        } break;
+        case 2: {
+          response_boost[0] = 1.0;
+          response_boost[1] = 1.5; // 135°
+          response_boost[2] = 1.0;
+          response_boost[3] = 1.0;
+        } break;
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform4fv(histogramComputerShaderProgram.response_boost, response_boost));
 
       // Bind vertex data and set vertex attributes (as from a VAO)
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
@@ -1007,8 +1031,8 @@
         for (y = 0; y < height; ++y) {
           for (x = 0; x < width; ++x) {
             var this_index = y * width * 4 + x * 4;
-            var max_uninteresting_angles = Math.max(texture0_data[this_index + 1], texture0_data[this_index + 2],
-              texture0_data[this_index + 3], texture1_data[this_index], texture1_data[this_index + 1],
+            var max_uninteresting_angles = Math.max(/* 0 not here, */texture0_data[this_index + 1], texture0_data[this_index + 2],
+              texture0_data[this_index + 3], texture1_data[this_index], texture1_data[this_index + 1], /* 0 not here, */
               texture1_data[this_index + 3], texture2_data[this_index], texture2_data[this_index + 1],
               texture2_data[this_index + 2], texture2_data[this_index + 3], 0);
             if (max_uninteresting_angles > 0) {
