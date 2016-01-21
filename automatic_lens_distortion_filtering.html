@@ -329,7 +329,7 @@
     // Reduces a WxH texture data outputting 4 float values per 4 angles each time
     // (with 60 angles this has to be called 15 times)
     precision highp float;
-    
+
     uniform sampler2D input_texture;
     uniform vec2 input_texture_size;
 
@@ -353,42 +353,35 @@
       const vec4 bitSh = vec4(1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0);
       return(dot(value, bitSh));
     }
-    
-    void main(void) {
 
-      float increment_x = 1.0 / input_texture_size.x;
-      float increment_y = 1.0 / input_texture_size.y;
+    void main(void) {
 
       float pixels_count = 0.0;
 
-      float my_bin = (pass_TextureCoord.x - (increment_x / 2.0));
+      float my_bin = pass_TextureCoord.x;
 
-      for(float y = 0.0; y < 1024.0; y += 1.0) {
-        if(y > input_texture_size.y) // Another workaround for constant expressions
-          break;
+      for(float y = 0.0; y < 512.0; ++y) {
 
-        for(float x = 0.0; x < 1024.0; x += 1.0) {
-          if(x > input_texture_size.x) // Another workaround for constant expressions
-            break;
+        for(float x = 0.0; x < 512.0; ++x) {
     
-          vec4 pixel_result = texture2D(input_texture, vec2(x / input_texture_size.x, y / input_texture_size.y));
+          vec4 pixel_result = texture2D(input_texture, vec2(x / 512.0 + (1.0/512.0)/2.0, y / 512.0 + (1.0/512.0)/2.0));
 
           if(isAboutEqual(pixel_result.x, 1.0)) {
             // There was a response for this pixel, check if it's in our bin
             float bin = pixel_result.y;
             if(isAboutEqual(bin, my_bin))
-              pixels_count += 1.0;          
+              ++pixels_count;
           }
         }
       }
 
       // Normalize the values on the entire texture
-      pixels_count /= 512.0 * 512.0;
+      pixels_count /= (512.0 * 512.0);
 
       // First one is the percentage of pixels that responded to the filter
-      gl_FragColor = vec4(pixels_count, 0.0, 0.0, 0.0);
+      gl_FragColor = packFloatToVec4i(pixels_count);
     }
-    
+
   </script>
 
   <!-- Visual feedback output -->
@@ -708,7 +701,7 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
       }
-      textureId.image.src = "assets/pincushion_distortion_45_2.png";
+      textureId.image.src = "assets/pincushion_distortion.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -964,8 +957,16 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, 60, 1, gl.RGBA, gl.UNSIGNED_BYTE, data_uint8));
       var result_angles = new Float32Array(60);
 
+      //float unpackFloatFromVec4i(const vec4 value) {
+      //  const vec4 bitSh = vec4(1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0);
+      //  return(dot(value, bitSh));
+      //}
       for (var i = 0; i < 60; ++i) {
-        result_angles[i] = data_uint8[i * 4] / 256.0;
+        var bitSh = [1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0];
+        var result = 0.0;
+        for(var j = 0; j < 4; ++j)
+          result += (data_uint8[i * 4 + j] / 256.0) * bitSh[j];
+        result_angles[i] = result;
       }
       ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
       return result_angles;
@@ -1195,8 +1196,8 @@
       
       histogramReductionInFramebuffer();
 
-      //var histogram = getComponentsFromReducedTexture(histogram_reduced_row);
-      var histogram = histogramReductionCPU();
+      var histogram = getComponentsFromReducedTexture(histogram_reduced_row);
+      //var histogram = histogramReductionCPU();
 
       
       // Debug
@@ -1237,7 +1238,7 @@
 
       // Scale up these values to indicate how many pixels responded to a given angle
       for (var i = 0; i < histogram.length; ++i) {
-       // histogram[i] = 512.0 * 512.0 * histogram[i];
+        histogram[i] = 512.0 * 512.0 * histogram[i];
       }
 
       var ptag = document.getElementById("debug-paragraph");
