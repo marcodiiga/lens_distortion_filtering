@@ -9,7 +9,7 @@
 
   <script id="debug-fs" type="x-shader/x-fragment">
     // Debug fs
-    precision mediump float;
+    precision highp float;
     uniform sampler2D texture_diffuse;
     varying vec4 pass_Color;
     varying vec2 pass_TextureCoord;
@@ -40,7 +40,7 @@
   <script id="undistortion-shader-fs" type="x-shader/x-fragment">
     // Renders to the target framebuffer an undistorted version of the input
     // texture via an approximate radial undistortion filtering
-    precision mediump float;
+    precision highp float;
     
     uniform sampler2D texture_diffuse;
     uniform vec2 image_dimensions;
@@ -66,9 +66,9 @@
       
       // Calculate the deflated or inflated new coordinate (reverse transform)
       float x3 = x / (1.0 - alphax * r);
-		  float y3 = y / (1.0 - alphay * r); 
-			float x2 = x / (1.0 - alphax * (x3 * x3 + y3 * y3));
-			float y2 = y / (1.0 - alphay * (x3 * x3 + y3 * y3));	
+      float y3 = y / (1.0 - alphay * r); 
+      float x2 = x / (1.0 - alphax * (x3 * x3 + y3 * y3));
+      float y2 = y / (1.0 - alphay * (x3 * x3 + y3 * y3));	
       
       // Forward transform
       // float x2 = x * (1.0 - alphax * r);
@@ -87,10 +87,8 @@
         // on the border of the input image before transferring it to the GPU
 
         float alpha = 1.0;
-        if(isAboutEqual(pass_TextureCoord.x, 0.0) ||
-           isAboutEqual(pass_TextureCoord.y, 0.0) ||
-           isAboutEqual(pass_TextureCoord.x, 1.0) ||
-           isAboutEqual(pass_TextureCoord.y, 1.0))
+        if(isAboutEqual(i2, 0.0) || isAboutEqual(j2, 0.0) ||
+           isAboutEqual(i2, 1.0) || isAboutEqual(j2, 1.0))
           alpha = 0.0;
             
         texture_color.a = alpha;
@@ -122,13 +120,13 @@
     }
   </script>
   
-  <!-- Edge detection filter shaders -->
-  <script id="edgedetection-shader-fs" type="x-shader/x-fragment">
-    // Renders to the target framebuffer the result of a sobel edge-detection kernel
-    precision mediump float;
+  <!-- Histogram computer shader -->
+  <script id="histogram-computer-shader-fs" type="x-shader/x-fragment">
+    // Computes an edge-response histogram in a texture
+    precision highp float;
     
     uniform sampler2D input_texture;
-    uniform vec2 input_texture_size;
+    uniform vec2 input_texture_size;    
 
     //
     // Rotation vectors for the kernel. We're interested into covering a 360°
@@ -138,7 +136,14 @@
     // computation we precompute these vectors (as a couple of (x;y) vector
     // components) on the CPU and then pass it to the shader here.
     //
-    uniform vec2 rotation_du[12];
+    // There are two steps:
+    // 1) Test each pixel against one of the 12 15° increments and detect the
+    //    maximum response
+    // 2) Each "reactive" bin is further refined with 3° increments to detect 
+    //    the final bin this texel belongs to
+    //
+    uniform vec2 rotation_du[12 * 5];
+    uniform float response_boost[12 * 5];
     
     varying vec4 pass_Color; // Unused/for debugging purposes
     varying vec2 pass_TextureCoord;
@@ -146,8 +151,6 @@
     float applyThreshold(float value, float threshold) {
       if(value < threshold)
         value = 0.0;
-      else
-        value = 1.0; // Standardized response
       return value;
     }
 
@@ -160,136 +163,269 @@
         return false;
     }
 
+    // Deals with floating point imprecisions
+    bool isAboutEqual(float v1, float v2) {
+      return abs(v1 - v2) < 0.01;
+    }
+
     // Any computation involving the texture border is unreliable. Check if
     // this point is on a alpha == 0 component and return true if it is
     bool isOnTextureBorder(vec4 texel_color) {
-      if(texel_color.a == 0.0)
+      if(isAboutEqual(texel_color.a, 0.0))
         return true;
       else
         return false;
     }
 
+    vec4 calculateKernelRows(vec2 l_du, vec2 l_dv, vec2 r_du, vec2 r_dv) {
+      vec4 result = vec4(0.0, 0.0, 0.0, 1.0); // RGB results and alpha factor
+      float inc = 1.0;
+      for (int i = 0; i < 10; ++i) {
+        vec2 l_point = pass_TextureCoord + l_du + (inc * l_dv);
+        vec2 r_point = pass_TextureCoord + r_du + (inc * r_dv);
+                
+        vec4 l_rgba = texture2D(input_texture, l_point);
+        vec4 r_rgba = texture2D(input_texture, r_point);
+
+        result.a *= l_rgba.a * r_rgba.a; // Store alpha factor
+
+        result.xyz += abs(r_rgba.xyz - l_rgba.xyz);
+        
+        inc += 1.0;
+      }
+      return result;
+    }
+
+    float calculateTotalKernelResponse(vec2 du, vec2 dv) {
+
+      vec4 result = vec4(0.0, 0.0, 0.0, 1.0); // RGB responses per each pixel plus alpha factor response
+
+      // Remember that with increments of 3° each the kernel should be
+      // longer than 19 pixels
+
+      //
+      // float sobel_kernel[9];
+      // sobel_kernel[0] = -1.0; sobel_kernel[1] = 0.0; sobel_kernel[2] = +1.0;
+      // sobel_kernel[3] = -1.5; sobel_kernel[4] = 0.0; sobel_kernel[5] = +1.5;
+      // sobel_kernel[6] = -1.0; sobel_kernel[7] = 0.0; sobel_kernel[8] = +1.0;
+
+      // << Row 1 and extensions above it >>
+        
+      vec4 rows_result = calculateKernelRows(-du, -dv, +du, -dv);
+      result.xyz += rows_result.xyz;
+      result.a *= rows_result.a;
+
+      // << Row 2 - central row >>
+
+      vec2 r_point = pass_TextureCoord + du; // Texture texel to be multiplied with kernel position 5
+      vec2 l_point = pass_TextureCoord - du; // ditto with kernel pos 3
+        
+      vec4 l_rgba = texture2D(input_texture, l_point);
+      vec4 r_rgba = texture2D(input_texture, r_point);        
+
+      result.a *= l_rgba.a * l_rgba.a;
+      result.xyz += 1.5 * abs(r_rgba.xyz - l_rgba.xyz);
+
+      // << Row 2 and extensions below it >>
+        
+      rows_result = calculateKernelRows(-du, +dv, +du, +dv);
+      result.xyz += rows_result.xyz;
+      result.a *= rows_result.a;
+        
+      // Apply the alpha factors (1.0 if everything is included into the
+      // computation, 0.0 if something triggered a no-compute for this kernel)
+      result *= result.a;
+
+      // Sum all responses before thresholding and normalize it in the
+      // range [0.0;1.0] (max for the kernel is 10 * 3.0 + 1 * 1.5 * 3.0 + 10 * 3.0 = 64.5)
+      return abs(result.x + result.y + result.z) / 64.5;
+    }
+
     void main(void) {
-      
-      // Responses to the filter per each channel (sum of all kernel rotations)
-      float result_r = 0.0;
-      float result_g = 0.0;
-      float result_b = 0.0;
-      float result_a = 0.0;
 
-      // Loop over all the rotation vectors (equivalent to rotating the kernel)
-      for(int i = 0; i < 12; ++i) {
-        vec2 du = rotation_du[i];
-        vec2 dv = vec2(du.y, -du.x); // Obtain the perpendicular vector
+      vec4 response = vec4(0.0, 0.0, 0.0, 0.0);
+      //                   ^^^  ^^^
+      //                   |||  |||
+      //                   |||  bin (if response is 1)
+      //                   response
 
-        //
-        // float sobel_kernel[9];
-        // sobel_kernel[0] = -1.0; sobel_kernel[1] = 0.0; sobel_kernel[2] = +1.0;
-        // sobel_kernel[3] = -1.5; sobel_kernel[4] = 0.0; sobel_kernel[5] = +1.5;
-        // sobel_kernel[6] = -1.0; sobel_kernel[7] = 0.0; sobel_kernel[8] = +1.0;
+      float phase1_threshold = 0.4;
 
-        // << Row 1 >>
+      int phase1_strongest_bin = -1; // -1 means no bin had a strong response
+      float phase1_strongest_response = 0.0;
 
-        vec2 p1 = pass_TextureCoord + du - dv; // Texture texel to be multiplied with kernel position 2
-        vec2 p2 = pass_TextureCoord - du - dv; // ditto with ker pos 0
+      // Step 1 - first 12 bins to detect stronger response
+
+      for (int i = 0; i < 12; ++i) {
+
+        vec2 du = rotation_du[5 * i]; // Grab one of the 12 primary vectors
+        vec2 dv = vec2(du.y, -du.x);  // Obtain the perpendicular vector
         
-        if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
-          // Force the response to be 0 and bail out
-          result_r = 0.0;
-          result_g = 0.0;
-          result_b = 0.0;
-          result_a = 0.0;
-          break;
+        float bin_response = calculateTotalKernelResponse(du, dv) * response_boost[5 * i];
+
+        bin_response = applyThreshold(bin_response, phase1_threshold);
+
+        // Detect if we had the strongest response for this bin
+        if (bin_response > phase1_strongest_response) {
+          phase1_strongest_response = bin_response;
+          phase1_strongest_bin = i;
         }
-        
-        vec4 p1_rgba = texture2D(input_texture, p1);
-        vec4 p2_rgba = texture2D(input_texture, p2);
-        
-        if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
-          // Force the response to be 0 and bail out
-          result_r = 0.0;
-          result_g = 0.0;
-          result_b = 0.0;
-          result_a = 0.0;
-          break;
-        }
-
-        result_r += p1_rgba.r - p2_rgba.r;
-        result_g += p1_rgba.g - p2_rgba.g;
-        result_b += p1_rgba.b - p2_rgba.b;
-        result_a += p1_rgba.a - p2_rgba.a;
-
-        // << Row 2 >>
-
-        p1 = pass_TextureCoord + du; // Texture texel to be multiplied with kernel position 5
-        p2 = pass_TextureCoord - du; // ditto with ker pos 3
-        
-        if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
-          // Force the response to be 0 and bail out
-          result_r = 0.0;
-          result_g = 0.0;
-          result_b = 0.0;
-          result_a = 0.0;
-          break;
-        }
-        
-        p1_rgba = texture2D(input_texture, p1);
-        p2_rgba = texture2D(input_texture, p2);
-        
-        if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
-          // Force the response to be 0 and bail out
-          result_r = 0.0;
-          result_g = 0.0;
-          result_b = 0.0;
-          result_a = 0.0;
-          break;
-        }
-
-        result_r += 1.5 * (p1_rgba.r - p2_rgba.r);
-        result_g += 1.5 * (p1_rgba.g - p2_rgba.g);
-        result_b += 1.5 * (p1_rgba.b - p2_rgba.b);
-        result_a += 1.5 * (p1_rgba.a - p2_rgba.a);
-
-        // << Row 2 >>
-
-        p1 = pass_TextureCoord + du + dv; // Texture texel to be multiplied with kernel position 8
-        p2 = pass_TextureCoord - du + dv; // ditto with ker pos 6
-        
-        if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
-          // Force the response to be 0 and bail out
-          result_r = 0.0;
-          result_g = 0.0;
-          result_b = 0.0;
-          result_a = 0.0;
-          break;
-        }
-        
-        p1_rgba = texture2D(input_texture, p1);
-        p2_rgba = texture2D(input_texture, p2);
-        
-        if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
-          // Force the response to be 0 and bail out
-          result_r = 0.0;
-          result_g = 0.0;
-          result_b = 0.0;
-          result_a = 0.0;
-          break;
-        }
-
-        result_r += p1_rgba.r - p2_rgba.r;
-        result_g += p1_rgba.g - p2_rgba.g;
-        result_b += p1_rgba.b - p2_rgba.b;
-        result_a += p1_rgba.a - p2_rgba.a;
-        
       }
 
+      float phase2_threshold = 0.72;
 
-      // Sum all responses before thresholding
-      float total_response = result_r + result_g + result_b + result_a;
+      int phase2_strongest_bin = -1; // -1 means no bin had a strong response
+      float phase2_strongest_response = 0.0;
 
-      total_response = applyThreshold(total_response, 0.5);
+      // Step 2 - refine to detect fine-grained strongest response bin
+      
+      if (phase1_strongest_bin != -1) {
+
+        for (int i = -2; i <= 2; ++i) {
+          int sub_bin = (5 * phase1_strongest_bin) + i;
+
+          // Wrap around in the [0;60[ interval
+          if (sub_bin < 0)
+            sub_bin += 60;
+          sub_bin = sub_bin - ((sub_bin / 60) * 60); // No modulo in ES 2.0
+
+          vec2 du;
+          vec2 dv;
+          float response_boost_float = 0.0;
+          for(int i2=0; i2<60; ++i2){ // Wasteful stupid way to overcome ES 2.0
+                                      // limitations on accessing rotation_du[sub_bin]
+            if(i2 == sub_bin) {
+              du = rotation_du[i2]; // Grab refined secondary vector
+              dv = vec2(du.y, -du.x);    // Obtain the perpendicular vector
+              response_boost_float = response_boost[i2];
+              break;
+            }
+          }
+
+          float bin_response = calculateTotalKernelResponse(du, dv);
+
+          bin_response = applyThreshold(bin_response, phase2_threshold) * response_boost_float;
+
+          // Detect if we had the strongest response for this bin
+          if (bin_response > phase2_strongest_response) {
+            phase2_strongest_response = bin_response;
+            phase2_strongest_bin = sub_bin;
+          }
+        }
+
+        if (phase2_strongest_bin != -1) {
+          // Success - we had a strong response for one refined bin
+          response.x = 1.0;
+          response.y = (1.0 / 60.0) * float(phase2_strongest_bin);
+        }
+      }
+     
+      gl_FragColor = response;
+    }
+  </script>
+
+  <!-- Reduction shader -->
+  <script id="row-reduction-shader-fs" type="x-shader/x-fragment">
+    // Reduces a WxH texture data outputting 4 float values per 4 angles each time
+    // (with 60 angles this has to be called 15 times)
+    precision highp float;
+
+    uniform sampler2D input_texture;
+    uniform vec2 input_texture_size;
+
+    varying vec4 pass_Color; // Unused/for debugging purposes
+    varying vec2 pass_TextureCoord;
+
+    // Deals with floating point imprecisions
+    bool isAboutEqual(float v1, float v2) {
+      return abs(v1 - v2) < 0.01;
+    }
+
+    vec4 packFloatToVec4i(const float value) {
+      const vec4 bitSh = vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0);
+      const vec4 bitMsk = vec4(0.0, 1.0/256.0, 1.0/256.0, 1.0/256.0);
+      vec4 res = fract(value * bitSh);
+      res -= res.xxyz * bitMsk;
+      return res;
+    }
+
+    float unpackFloatFromVec4i(const vec4 value) {
+      const vec4 bitSh = vec4(1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0);
+      return(dot(value, bitSh));
+    }
+
+    void main(void) {
+
+      float pixels_count = 0.0;
+
+      float my_bin = pass_TextureCoord.x;
+
+      for(float y = 0.0; y < 512.0; ++y) {
+
+        for(float x = 0.0; x < 512.0; ++x) {
     
-      gl_FragColor = vec4(total_response, total_response, total_response, 1.0);
+          vec4 pixel_result = texture2D(input_texture, vec2(x / 512.0 + (1.0/512.0)/2.0, y / 512.0 + (1.0/512.0)/2.0));
+
+          if(isAboutEqual(pixel_result.x, 1.0)) {
+            // There was a response for this pixel, check if it's in our bin
+            float bin = pixel_result.y;
+            if(isAboutEqual(bin, my_bin))
+              ++pixels_count;
+          }
+        }
+      }
+
+      // Normalize the values on the entire texture
+      pixels_count /= (512.0 * 512.0);
+
+      // First one is the percentage of pixels that responded to the filter
+      gl_FragColor = packFloatToVec4i(pixels_count);
+    }
+
+  </script>
+
+  <!-- Visual feedback output -->
+  <script id="visual-feedback-fs" type="x-shader/x-fragment">
+    // Outputs the detected angles with some colors, aids in debugging
+    precision highp float;
+    uniform sampler2D input_texture;
+    varying vec4 pass_Color;
+    varying vec2 pass_TextureCoord;
+    
+    bool isAboutEqual(float v1, float v2) {
+      return abs(v1 - v2) < 0.01;
+    }
+
+    void main(void) {
+      
+      vec4 pixel = texture2D(input_texture, pass_TextureCoord);
+      if(isAboutEqual(pixel.x, 1.0)) {
+        // Response for this pixel
+        float bin = pixel.y * 60.0; // [0; 59]
+        vec3 color;
+        if(isAboutEqual(bin, 15.0)) // 45
+          color = vec3(0.0, 1.0, 0.0);
+        else if(isAboutEqual(bin, 45.0)) // 135
+          color = vec3(0.0, 1.0, 0.0);
+        else
+          color = vec3(1.0, 0.0, 0.0);
+          
+        gl_FragColor = vec4(color.rgb, 1.0);
+      } else
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);      
+    }
+  </script>
+  
+  <!-- Output in unsigned byte for CPU reduction -->
+  <script id="histogram-cpu-fs" type="x-shader/x-fragment">
+    precision highp float;
+    uniform sampler2D input_texture;
+    varying vec4 pass_Color;
+    varying vec2 pass_TextureCoord;
+    
+    void main(void) {      
+      vec4 pixel = texture2D(input_texture, pass_TextureCoord);
+      gl_FragColor = pixel;      
     }
   </script>
   
@@ -305,8 +441,15 @@
       } catch (e) {}
       if (!gl) {
         alert("Could not initialize WebGL");
+        return;
       }
    
+      var fptex_supported = gl.getExtension('OES_texture_float'); // Enable floating point textures
+      if (fptex_supported == null) {
+        alert("Floating point textures extension not supported");
+        return;
+      }
+
       setupQuad();
       initFramebuffer();
       initShaderPrograms();
@@ -315,7 +458,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.clearColor(0.0, 0.0, 0.0, 1.0));
       ctx = WebGLDebugUtils.makeDebugContext(gl.enable(gl.DEPTH_TEST));
       
-      paintLoop();
+      //paintLoop();
     }
     
     // Geometric and quad rendering data
@@ -337,13 +480,15 @@
 
     // Shader programs
     var undistortionShaderProgram; // Applies the undistortion filtering
-    var edgeDetectionShaderProgram; // Applies a sobel edge detection
+    var histogramComputerShaderProgram; // Calculates the edge histogram
+    var histogramReductionShaderProgram; // Reduces an histogram texture to a single row
     var debugProgram; // Just visualizes a texture
 
-    // Secondary framebuffers for intermediate computations
+    // Secondary framebuffers for intermediate computations and textures
     var renderFrameBuffer;
     var undistortionTexture;
-    var edgeDetectionTexture;
+    var histogram_responses;
+    var histogram_reduced_row;
 
     // Utility function to get and compile a shader
     function getShader(gl, id) {
@@ -391,8 +536,8 @@
       ctx = WebGLDebugUtils.makeDebugContext(renderbuffer = gl.createRenderbuffer());
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer));
       ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, renderFrameBuffer.width, renderFrameBuffer.height));
+      renderFrameBuffer.renderBuffer = renderbuffer; // Save it for later use
 
-      //ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, undistortionTexture, 0));
       ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, renderbuffer));
       
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
@@ -441,42 +586,52 @@
       ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.alphax = gl.getUniformLocation(undistortionShaderProgram, "alphax"));
       ctx = WebGLDebugUtils.makeDebugContext(undistortionShaderProgram.alphay = gl.getUniformLocation(undistortionShaderProgram, "alphay"));
       
-      // ~-~-~-~-~-~-~- Init the edge detection shader program ~-~-~-~-~-~-~-
+      // ~-~-~-~-~-~-~- Init the histogram computer shader program ~-~-~-~-~-~-~-
       
-      var edgeFragmentShader = getShader(gl, "edgedetection-shader-fs");
+      var edgeFragmentShader = getShader(gl, "histogram-computer-shader-fs");
       var edgeVertexShader = getShader(gl, "neuter-shader-vs");
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram = gl.createProgram());
-      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(edgeDetectionShaderProgram, edgeVertexShader));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(edgeDetectionShaderProgram, edgeFragmentShader));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(edgeDetectionShaderProgram));
-      if (!gl.getProgramParameter(edgeDetectionShaderProgram, gl.LINK_STATUS)) {
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramComputerShaderProgram, edgeVertexShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramComputerShaderProgram, edgeFragmentShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(histogramComputerShaderProgram));
+      if (!gl.getProgramParameter(histogramComputerShaderProgram, gl.LINK_STATUS)) {
         alert("Could not initialize shaders");
       }
-      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(edgeDetectionShaderProgram));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.inPosition = gl.getAttribLocation(edgeDetectionShaderProgram, "in_Position"));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(edgeDetectionShaderProgram.inPosition));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.inColor = gl.getAttribLocation(edgeDetectionShaderProgram, "in_Color"));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(edgeDetectionShaderProgram.inColor));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.inTextureCoord = gl.getAttribLocation(edgeDetectionShaderProgram, "in_TextureCoord"));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(edgeDetectionShaderProgram.inTextureCoord));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.pMatrixUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "uPMatrix"));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.mvMatrixUniform = gl.getUniformLocation(edgeDetectionShaderProgram, "uMVMatrix"));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.texture_size = gl.getUniformLocation(edgeDetectionShaderProgram, "input_texture_size"));
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionShaderProgram.rotation_du = gl.getUniformLocation(edgeDetectionShaderProgram, "rotation_du"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(histogramComputerShaderProgram));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.inPosition = gl.getAttribLocation(histogramComputerShaderProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramComputerShaderProgram.inPosition));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.inColor = gl.getAttribLocation(histogramComputerShaderProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramComputerShaderProgram.inColor));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.inTextureCoord = gl.getAttribLocation(histogramComputerShaderProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramComputerShaderProgram.inTextureCoord));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.pMatrixUniform = gl.getUniformLocation(histogramComputerShaderProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.mvMatrixUniform = gl.getUniformLocation(histogramComputerShaderProgram, "uMVMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.texture_size = gl.getUniformLocation(histogramComputerShaderProgram, "input_texture_size"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.rotation_du = gl.getUniformLocation(histogramComputerShaderProgram, "rotation_du"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.response_boost = gl.getUniformLocation(histogramComputerShaderProgram, "response_boost"));
 
-      //var rotation_du = gl.createBuffer();
-      //gl.bindBuffer(GL_UNIFORM_BUFFER, rotation_du);
-      var vectors = new Float32Array(12 * 2); // 12 vec2 increments, i.e. 180 / 15 degrees (see fragment shader)
-      var angle_increment_degrees = 15.0;
-      for (i = 0; i < 12; i++) {
-        var angle_radians = (i * angle_increment_degrees) / 180.0 * Math.PI;
+      // ~-~-~-~-~-~-~- Init the histogram reduction shader program ~-~-~-~-~-~-~-
 
-        vectors[i * 2] = Math.cos(angle_radians) / 512.0;
-        vectors[i * 2 + 1] = Math.sin(angle_radians) / 512.0;
+      var rowReductionFragmentShader = getShader(gl, "row-reduction-shader-fs");
+      var rowReductionVertexShader = getShader(gl, "neuter-shader-vs");
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, rowReductionVertexShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(histogramReductionShaderProgram, rowReductionFragmentShader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(histogramReductionShaderProgram));
+      if (!gl.getProgramParameter(histogramReductionShaderProgram, gl.LINK_STATUS)) {
+        alert("Could not initialize shaders");
       }
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.rotation_du, vectors));
-      //gl.bufferData(GL_UNIFORM_BUFFER, 12 * 4 /* sizeof(float) */, NULL, GL_DYNAMIC_DRAW);
-
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(histogramReductionShaderProgram));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.inPosition = gl.getAttribLocation(histogramReductionShaderProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramReductionShaderProgram.inPosition));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.inColor = gl.getAttribLocation(histogramReductionShaderProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramReductionShaderProgram.inColor));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.inTextureCoord = gl.getAttribLocation(histogramReductionShaderProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(histogramReductionShaderProgram.inTextureCoord));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.pMatrixUniform = gl.getUniformLocation(histogramReductionShaderProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.mvMatrixUniform = gl.getUniformLocation(histogramReductionShaderProgram, "uMVMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.texture_size = gl.getUniformLocation(histogramReductionShaderProgram, "input_texture_size"));
+      // ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.response_part = gl.getUniformLocation(histogramReductionShaderProgram, "response_part"));
 
       // ~-~-~-~-~-~-~- Init the debug shader program ~-~-~-~-~-~-~-
 
@@ -539,21 +694,13 @@
       textureId.image = new Image();
       textureId.image.onload = function () {
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId));
-        ctx = WebGLDebugUtils.makeDebugContext(gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true));
-        
-
-        // Important: borders are unreliable in lens correction (they incorrectly ramp up Sobel
-        // kernel's response). In order to detect those we set the alpha value to 0
-        // on the border of the input image before transferring it to the GPU
-
-        //textureId.image
-
+        ctx = WebGLDebugUtils.makeDebugContext(gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true));        
         ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textureId.image));
         ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
         ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
-      }      
+      }
       textureId.image.src = "assets/pincushion_distortion.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
@@ -566,13 +713,29 @@
                                              renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
 
-      // ~-~-~-~-~-~- Edge-detected texture ~-~-~-~-~-~-
-      ctx = WebGLDebugUtils.makeDebugContext(edgeDetectionTexture = gl.createTexture());
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, edgeDetectionTexture));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
-                                             renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
+      // ~-~-~-~-~-~- Histogram computing textures ~-~-~-~-~-~-
+      ctx = WebGLDebugUtils.makeDebugContext(histogram_responses = gl.createTexture());
+      
+      var setTextureSize = function () {
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
+                                               renderFrameBuffer.height, 0, gl.RGBA, gl.FLOAT, null));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      }
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses));
+      setTextureSize();
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+      // ~-~-~-~-~-~- Reduction textures ~-~-~-~-~-~-
+      ctx = WebGLDebugUtils.makeDebugContext(histogram_reduced_row = gl.createTexture());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_reduced_row));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      // 60 bins x 1 output (one row)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 60, // 60 bins - one row is sufficient
+                                             1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
     }
 
@@ -592,7 +755,6 @@
       // Map the texture perfectly to the viewport (i.e. project the quad to the front)
       mat4.identity(pMatrix);
       mat4.identity(mvMatrix);
-      //mat4.translate(mvMatrix, [0.0, 0.0, -1.0]);
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(undistortionShaderProgram.pMatrixUniform, false, pMatrix));
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(undistortionShaderProgram.mvMatrixUniform, false, mvMatrix));
 
@@ -632,45 +794,66 @@
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
 
-    // Render an edge detected texture
-    function renderEdgeDetectedInFramebuffer() {
+    // Calculates histogram data. 'response_part' is the histogram part that
+    // has to be calculated (see the fragment shader for more info)
+    function calculateHistogramDataInFramebuffer() {
       // Bind secondary framebuffer
       gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
 
-      // Makes sure we're rendering the entire texture (this will LATER be mapped to the viewport)
+      // Makes sure we're rendering the entire texture
       ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 512, 512));
       ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
 
-      // Set up edge detection shader program
-      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(edgeDetectionShaderProgram));
+      // Set up histogram calculator shader program
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(histogramComputerShaderProgram));
 
       // Set up projection and movelview uniforms
       // Map the texture perfectly to the viewport (i.e. project the quad to the front)
       mat4.identity(pMatrix);
       mat4.identity(mvMatrix);
-      //mat4.translate(mvMatrix, [0.0, 0.0, -1.0]);
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(edgeDetectionShaderProgram.pMatrixUniform, false, pMatrix));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(edgeDetectionShaderProgram.mvMatrixUniform, false, mvMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramComputerShaderProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramComputerShaderProgram.mvMatrixUniform, false, mvMatrix));
 
-      // Set texture delta uniforms
-      var du = [1.0 / 512.0, 0.0];
-      var dv = [0.0, 1.0 / 512.0];
-      var texture_size = [512.0, 512.0];
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.texture_delta_du, du));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.texture_delta_dv, dv));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(edgeDetectionShaderProgram.texture_size, texture_size));
+      // Set texture size uniforms
+      var texture_size_array = [512.0, 512.0];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.texture_size, texture_size_array));
 
       // Bind texture to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
-      var sampler2D_loc = gl.getUniformLocation(edgeDetectionShaderProgram, "input_texture");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
+      //ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, textureId)); // DEBUG DEBUG DEBUG
+      var sampler2D_loc = gl.getUniformLocation(histogramComputerShaderProgram, "input_texture");
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
+
+      // Fill the angle increments for the histogram computer shader      
+      var vectors = new Float32Array(12 * 5 * 2); // 60 vec2 increments, (see fragment shader)
+      var angle_increment_degrees = 3.0;
+      for (i = 0; i < 12 * 5; ++i) {
+        var angle_radians = (i * angle_increment_degrees) / 180.0 * Math.PI;
+
+        vectors[i * 2] = Math.cos(angle_radians) / 512.0;
+        vectors[i * 2 + 1] = Math.sin(angle_radians) / 512.0;
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.rotation_du, vectors));
+
+      // Fill response boost
+      var response_boost = new Float32Array(12 * 5);
+      for (i = 0; i < 12 * 5; ++i) {
+        var angle = i * angle_increment_degrees;
+        if (Math.floor(angle / 45) % 2) // is odd
+          response_boost[i] = 1 + ((Math.sqrt(2) - 1) * ((45 - (angle % 45)) / 45));
+        else
+          response_boost[i] = 1 + ((Math.sqrt(2) - 1) * ((angle % 45) / 45));
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1fv(histogramComputerShaderProgram.response_boost, response_boost));
 
       // Bind vertex data and set vertex attributes (as from a VAO)
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(edgeDetectionShaderProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(edgeDetectionShaderProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(edgeDetectionShaderProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramComputerShaderProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramComputerShaderProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramComputerShaderProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
 
       // Bind vertex index info
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
@@ -686,38 +869,343 @@
       // Restore normal framebuffer
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
+
+    // Computes a reduction to one row for the histogram data
+    function histogramReductionInFramebuffer() {
+      // Bind secondary framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
+
+      // Resize secondary framebuffer depth buffer to accommodate for the Wx1 output texture
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderFrameBuffer.renderBuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, 60, 1));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
+
+      // Sets only one row of bins to be computed
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 60, 1));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
+
+      // Set up histogram reduction shader program
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(histogramReductionShaderProgram));
+
+      // Set up projection and movelview uniforms
+      // Map the texture perfectly to the viewport (i.e. project the quad to the front)
+      mat4.identity(pMatrix);
+      mat4.identity(mvMatrix);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.mvMatrixUniform, false, mvMatrix));
+
+      // Set input texture size uniforms
+      var texture_size_array = [512.0, 512.0];
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramReductionShaderProgram.texture_size, texture_size_array));
+
+      // Set reduction part
+      // ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1f(histogramReductionShaderProgram.response_part, histogram_part));
+
+      // Bind the right texture input to texture unit 0
+      ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses));
+      // Since these are data textures, in order to facilitate lookup set nearest filters
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      var sampler2D_loc = gl.getUniformLocation(histogramReductionShaderProgram, "input_texture");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));      
+
+      // Bind vertex data and set vertex attributes (as from a VAO)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramReductionShaderProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramReductionShaderProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(histogramReductionShaderProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+
+      // Bind vertex index info
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+
+      // Draw the quad
+      ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
+
+      // Cleanup
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));      
+
+      // Restore normal framebuffer
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // Also restore normal depth buffer
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderFrameBuffer.renderBuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, renderFrameBuffer.width, renderFrameBuffer.height));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
+    }
+  
+    // Given a reduced texture row (histogram data) reduces this on the CPU to a
+    // simple array of 4 angles
+    function getComponentsFromReducedTexture(texture) {
+      // Create a framebuffer backed by the supplied texture
+      var framebuffer;
+      ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
+
+      var renderbuffer;
+      ctx = WebGLDebugUtils.makeDebugContext(renderbuffer = gl.createRenderbuffer());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, 60, 1));
+      framebuffer.renderBuffer = renderbuffer;
+      ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, renderbuffer));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
+      // Read the contents of the texture from the framebuffer
+      var data_uint8 = new Uint8Array(60 * 1 * 4); // 60 bin responses, each one packed into 4 8-bit components
+      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, 60, 1, gl.RGBA, gl.UNSIGNED_BYTE, data_uint8));
+      var result_angles = new Float32Array(60);
+
+      //float unpackFloatFromVec4i(const vec4 value) {
+      //  const vec4 bitSh = vec4(1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0);
+      //  return(dot(value, bitSh));
+      //}
+      for (var i = 0; i < 60; ++i) {
+        var bitSh = [1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0];
+        var result = 0.0;
+        for(var j = 0; j < 4; ++j)
+          result += (data_uint8[i * 4 + j] / 256.0) * bitSh[j];
+        result_angles[i] = result;
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+      return result_angles;
+    }
     
-    function drawScene() {
+    
+    function histogramReductionCPU() {
+    
+      var visualFeedbackProgram;
+      var fragment_shader = getShader(gl, "histogram-cpu-fs");
+      var vertex_shader = getShader(gl, "neuter-shader-vs");
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(visualFeedbackProgram, vertex_shader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(visualFeedbackProgram, fragment_shader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(visualFeedbackProgram));
+      if (!gl.getProgramParameter(visualFeedbackProgram, gl.LINK_STATUS)) {
+        alert("Could not initialize shaders");
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(visualFeedbackProgram));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.inPosition = gl.getAttribLocation(visualFeedbackProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(visualFeedbackProgram.inPosition));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.inColor = gl.getAttribLocation(visualFeedbackProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(visualFeedbackProgram.inColor));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.inTextureCoord = gl.getAttribLocation(visualFeedbackProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(visualFeedbackProgram.inTextureCoord));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.pMatrixUniform = gl.getUniformLocation(visualFeedbackProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.mvMatrixUniform = gl.getUniformLocation(visualFeedbackProgram, "uMVMatrix"));
+
+      var output_8bit_texture;
+      ctx = WebGLDebugUtils.makeDebugContext(output_8bit_texture = gl.createTexture());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, output_8bit_texture));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 512,
+                                             512, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+    
+      attachTextureToFrameBuffer(output_8bit_texture);
+      
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 512, 512));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(visualFeedbackProgram));
+      mat4.identity(pMatrix);
+      mat4.identity(mvMatrix);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(visualFeedbackProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(visualFeedbackProgram.mvMatrixUniform, false, mvMatrix));
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      var sampler2D_loc = gl.getUniformLocation(visualFeedbackProgram, "input_texture");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
+
+      // Bind vertex data and set vertex attributes (as from a VAO)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(visualFeedbackProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(visualFeedbackProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(visualFeedbackProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+
+      // Draw the quad
+      ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
+
+      // CPU-calculate histogram
+      var histogram = new Float32Array(60);
+        
+      var width = 512.0;
+      var height = 512.0;
+      var data = new Uint8Array(width * height * 4);
+      var data_flipped = new Uint8Array(width * height * 4);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data));
+      // Flip webgl data (usually Y-inverse stored)
+      for (y = 0; y < height; ++y) {
+        for (x = 0; x < width; ++x) {
+          data_flipped[y * width * 4 + x * 4] = data[(height - 1 - y) * width * 4 + x * 4];
+          data_flipped[y * width * 4 + x * 4 + 1] = data[(height - 1 - y) * width * 4 + x * 4 + 1];
+          data_flipped[y * width * 4 + x * 4 + 2] = data[(height - 1 - y) * width * 4 + x * 4 + 2];
+          data_flipped[y * width * 4 + x * 4 + 3] = data[(height - 1 - y) * width * 4 + x * 4 + 3];
+        }
+      }
+      
+      // Calculate histogram
+      for (y = 0; y < height; ++y) {
+        for (x = 0; x < width; ++x) {
+          if(data_flipped[y * width * 4 + x * 4] > 0.0) {
+            var bin = Math.floor((data_flipped[y * width * 4 + x * 4 + 1] / 255) * 60);
+            histogram[bin] += 1.0;
+          }
+        }
+      }
+
+      // Cleanup
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      
+      return histogram;
+    }
+    
+    function outputVisualFeedback() {
+      var visualFeedbackProgram;
+      var fragment_shader = getShader(gl, "visual-feedback-fs");
+      var vertex_shader = getShader(gl, "neuter-shader-vs");
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram = gl.createProgram());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(visualFeedbackProgram, vertex_shader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.attachShader(visualFeedbackProgram, fragment_shader));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.linkProgram(visualFeedbackProgram));
+      if (!gl.getProgramParameter(visualFeedbackProgram, gl.LINK_STATUS)) {
+        alert("Could not initialize shaders");
+      }
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(visualFeedbackProgram));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.inPosition = gl.getAttribLocation(visualFeedbackProgram, "in_Position"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(visualFeedbackProgram.inPosition));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.inColor = gl.getAttribLocation(visualFeedbackProgram, "in_Color"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(visualFeedbackProgram.inColor));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.inTextureCoord = gl.getAttribLocation(visualFeedbackProgram, "in_TextureCoord"));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.enableVertexAttribArray(visualFeedbackProgram.inTextureCoord));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.pMatrixUniform = gl.getUniformLocation(visualFeedbackProgram, "uPMatrix"));
+      ctx = WebGLDebugUtils.makeDebugContext(visualFeedbackProgram.mvMatrixUniform = gl.getUniformLocation(visualFeedbackProgram, "uMVMatrix"));
+
+      var output_8bit_texture;
+      ctx = WebGLDebugUtils.makeDebugContext(output_8bit_texture = gl.createTexture());
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, output_8bit_texture));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 512,
+                                             512, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+    
+      attachTextureToFrameBuffer(output_8bit_texture);
+      
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 512, 512));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.useProgram(visualFeedbackProgram));
+      mat4.identity(pMatrix);
+      mat4.identity(mvMatrix);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(visualFeedbackProgram.pMatrixUniform, false, pMatrix));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(visualFeedbackProgram.mvMatrixUniform, false, mvMatrix));
+
+      ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      var sampler2D_loc = gl.getUniformLocation(visualFeedbackProgram, "input_texture");
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
+
+      // Bind vertex data and set vertex attributes (as from a VAO)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(visualFeedbackProgram.inPosition, 4, gl.FLOAT, false, 10 * 4 /* 10 floats */, 0));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(visualFeedbackProgram.inColor, 4, gl.FLOAT, false, 10 * 4, 4 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.vertexAttribPointer(visualFeedbackProgram.inTextureCoord, 2, gl.FLOAT, false, 10 * 4, 8 * 4));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, vboiId));
+
+      // Draw the quad
+      ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
+
+      
+    
+      // Draw into the debug texture
+        
+      // only retain angles data
+      var width = 512.0;
+      var height = 512.0;
+      var data = new Uint8Array(width * height * 4);
+      var data_flipped = new Uint8Array(width * height * 4);
+      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data));
+      // Flip webgl data (usually Y-inverse stored)
+      for (y = 0; y < height; ++y) {
+        for (x = 0; x < width; ++x) {
+          data_flipped[y * width * 4 + x * 4] = data[(height - 1 - y) * width * 4 + x * 4];
+          data_flipped[y * width * 4 + x * 4 + 1] = data[(height - 1 - y) * width * 4 + x * 4 + 1];
+          data_flipped[y * width * 4 + x * 4 + 2] = data[(height - 1 - y) * width * 4 + x * 4 + 2];
+          data_flipped[y * width * 4 + x * 4 + 3] = data[(height - 1 - y) * width * 4 + x * 4 + 3];
+        }
+      }
+
+      // Create a 2D canvas to store the result 
+      var canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      var context = canvas.getContext('2d');
+
+      // Copy the pixels to a 2D canvas
+      var imageData = context.createImageData(width, height);
+      imageData.data.set(data_flipped);
+      context.putImageData(imageData, 0, 0);
+
+      // Cleanup
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      
+      return canvas.toDataURL();
+    }
+
+    function estimateHistogram() {
       
       if(textureIsSafeToRender == false)
-        return; // Still can't render stuff if the texture hasn't been loaded yet
+        return []; // Still can't render stuff if the texture hasn't been loaded yet
 
       // First render an undistorted image in the framebuffer texture
       attachTextureToFrameBuffer(undistortionTexture);
       renderUndistortedInFramebuffer();
 
-      // Render the sobel-filtered texture
-      attachTextureToFrameBuffer(edgeDetectionTexture);
-      renderEdgeDetectedInFramebuffer();
-
-      // TODO!
+      // Render and calculate all the histogram responses
+      attachTextureToFrameBuffer(histogram_responses);
+      calculateHistogramDataInFramebuffer();
 
 
+      //var img = document.getElementById("debug-img");
+      //img.src = outputVisualFeedback();
+      //ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+      //// DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
 
 
+      
 
+      // Now reduce all the responses
+      attachTextureToFrameBuffer(histogram_reduced_row); // Output into this
+      
+      histogramReductionInFramebuffer();
 
+      var histogram = getComponentsFromReducedTexture(histogram_reduced_row);
+      //var histogram = histogramReductionCPU();
 
-
-
-
-
+      
       // Debug
       var img = document.getElementById("debug-img");
-      img.src = createImageFromTexture(gl, edgeDetectionTexture, 512, 512);
+      img.src = outputVisualFeedback();
       
-      // Debug - re-render back
-
+      // Debug - re-render back the undistorted image
+      
       // This time only draw the canvas size
       ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight));
       ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
@@ -744,12 +1232,84 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
+
+
+      // Return complete histogram
+
+      // Scale up these values to indicate how many pixels responded to a given angle
+      for (var i = 0; i < histogram.length; ++i) {
+        histogram[i] = 512.0 * 512.0 * histogram[i];
+      }
+
+      var ptag = document.getElementById("debug-paragraph");
+      var text = "";
+      var angle = 0;
+      for(var i = 0; i < 60; ++i) {
+        text += angle + "°[" + histogram[i] + "]\n";
+        angle += 3;
+      }
+      ptag.innerText = text;
+
+      return histogram;
     }
     
-    function paintLoop() {    
+    function paintLoop() {
       requestAnimFrame(paintLoop);
-      drawScene();      
+      drawScene();
     }
+
+    /**
+     * The main calibration routine     
+     */
+    function calibration() {
+
+      var best_score_found = -1000.0;
+      var best_alpha = 0;
+
+      // Start a series of calibrations by providing undistortion parameters
+
+      var alpha = 1;
+
+      function calibrationSummary() {
+        alphax = (best_alpha * 0.01) * maximum_alpha;
+        alphay = alphax;
+        statusLog("Calibration done, best estimation for parameter " + best_alpha);
+        estimateHistogram();
+      }
+
+      function calibrateForAlpha() {
+        statusLog("Calibrating distortion filtering [" + alpha + "%]...");
+        alphax = (alpha * 0.01) * maximum_alpha;
+        alphay = alphax;
+
+        var histogram = estimateHistogram();
+        if (histogram.length == 0)
+          calibrateForAlpha(); // Wait for the images to be fully loaded
+
+        // Assign a score to this histogram
+        var score = Math.max.apply(Math, histogram) - Math.min.apply(Math, histogram);
+
+        //if (alpha == 50) {
+        //  statusLog("[DEBUG] diff is: " + Math.max.apply(Math, histogram) + " - " + Math.min.apply(Math, histogram) +
+        //    " = " + score);
+       // }
+
+        if (score > best_score_found) {
+          statusLog("New best score found: " + score + " [" + alpha + "%]...");
+          best_score_found = score;
+          best_alpha = alpha;
+        }
+
+        ++alpha;
+
+        if (alpha < 100)
+          setTimeout(calibrateForAlpha, 0.8);
+        else
+          calibrationSummary();
+      }
+
+      calibrateForAlpha();
+    }    
     
     // ~-~-~-~-~-~-~-~-~- UI related handling routines ~-~-~-~-~-~-~-~-~-
     
@@ -777,11 +1337,23 @@
         } break;
       }
     }
+
+    function statusLog(text) {
+      document.getElementById("text-status").innerText = text;
+    }
+
+    function startCalibration() {
+      document.getElementById("calib_btn").hidden = true;
+      calibration();
+    }
+
     // ~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-
         
   </script>
 </head>
 <body onload="webGLStart();">
+  <button id="calib_btn" onclick="startCalibration();">Start calibration</button>
+  <p id="text-status"></p>
   <div style="padding: 10px;">
     <div style="float: left;">
       <!-- WARNING: KEEP THE DIMENSIONS UNDER 512x512, OTHERWISE A BIGGER TEXTURE IS NEEDED -->
@@ -803,6 +1375,11 @@
       </div>
     </div>
   </div>
+  <br />
   <img id="debug-img" />
+  <p id="debug-paragraph"></p>
+  <a id="debug-anchor" href="">Download first texture histogram as text file</a>
 </body>
 </html>
+
+
