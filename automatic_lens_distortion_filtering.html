@@ -122,7 +122,7 @@
   
   <!-- Histogram computer shader -->
   <script id="histogram-computer-shader-fs" type="x-shader/x-fragment">
-    // Computes part of an edge-response histogram in a texture
+    // Computes an edge-response histogram in a texture
     precision highp float;
     
     uniform sampler2D input_texture;
@@ -136,8 +136,14 @@
     // computation we precompute these vectors (as a couple of (x;y) vector
     // components) on the CPU and then pass it to the shader here.
     //
-    uniform vec2 rotation_du[4];
-    uniform vec4 response_boost;
+    // There are two steps:
+    // 1) Test each pixel against one of the 12 15° increments and detect the
+    //    maximum response
+    // 2) Each "reactive" bin is further refined with 3° increments to detect 
+    //    the final bin this texel belongs to
+    //
+    uniform vec2 rotation_du[12 * 5];
+    // uniform vec4 response_boost; // TODO
     
     varying vec4 pass_Color; // Unused/for debugging purposes
     varying vec2 pass_TextureCoord;
@@ -173,212 +179,155 @@
         return false;
     }
 
+    vec4 calculateKernelRows(vec2 l_du, vec2 l_dv, vec2 r_du, vec2 r_dv) {
+      vec4 result = vec4(0.0, 0.0, 0.0, 1.0); // RGB results and alpha factor
+      float inc = 1.0;
+      for (int i = 0; i < 10; ++i) {
+        vec2 l_point = pass_TextureCoord + l_du + (inc * l_dv);
+        vec2 r_point = pass_TextureCoord + r_du + (inc * r_dv);
+                
+        vec4 l_rgba = texture2D(input_texture, l_point);
+        vec4 r_rgba = texture2D(input_texture, r_point);
+
+        result.a *= l_rgba.a * r_rgba.a; // Store alpha factor
+
+        result.xyz += abs(r_rgba.xyz - l_rgba.xyz);
+        
+        inc += 1.0;
+      }
+      return result;
+    }
+
+    float calculateTotalKernelResponse(vec2 du, vec2 dv) {
+
+      vec4 result = vec4(0.0, 0.0, 0.0, 1.0); // RGB responses per each pixel plus alpha factor response
+
+      // Remember that with increments of 3° each the kernel should be
+      // longer than 19 pixels
+
+      //
+      // float sobel_kernel[9];
+      // sobel_kernel[0] = -1.0; sobel_kernel[1] = 0.0; sobel_kernel[2] = +1.0;
+      // sobel_kernel[3] = -1.5; sobel_kernel[4] = 0.0; sobel_kernel[5] = +1.5;
+      // sobel_kernel[6] = -1.0; sobel_kernel[7] = 0.0; sobel_kernel[8] = +1.0;
+
+      // << Row 1 and extensions above it >>
+        
+      vec4 rows_result = calculateKernelRows(-du, -dv, +du, -dv);
+      result.xyz += rows_result.xyz;
+      result.a *= rows_result.a;
+
+      // << Row 2 - central row >>
+
+      vec2 r_point = pass_TextureCoord + du; // Texture texel to be multiplied with kernel position 5
+      vec2 l_point = pass_TextureCoord - du; // ditto with kernel pos 3
+        
+      vec4 l_rgba = texture2D(input_texture, l_point);
+      vec4 r_rgba = texture2D(input_texture, r_point);        
+
+      result.a *= l_rgba.a * l_rgba.a;
+      result.xyz += 1.5 * abs(r_rgba.xyz - l_rgba.xyz);
+
+      // << Row 2 and extensions below it >>
+        
+      rows_result = calculateKernelRows(-du, +dv, +du, +dv);
+      result.xyz += rows_result.xyz;
+      result.a *= rows_result.a;
+        
+      // Apply the alpha factors (1.0 if everything is included into the
+      // computation, 0.0 if something triggered a no-compute for this kernel)
+      result *= result.a;
+
+      // Sum all responses before thresholding and normalize it in the
+      // range [0.0;1.0] (max for the kernel is 10 * 3.0 + 1 * 1.5 * 3.0 + 10 * 3.0 = 64.5)
+      return abs(result.x + result.y + result.z) / 64.5;
+    }
+
     void main(void) {
-     
-      vec4 angle_responses = vec4(0.0, 0.0, 0.0, 0.0);
 
-      // Channel responses for this angle (alpha is not used)
-      vec3 result;
+      vec4 response = vec4(0.0, 0.0, 0.0, 0.0);
+      //                   ^^^  ^^^
+      //                   |||  |||
+      //                   |||  bin (if response is 1)
+      //                   response
 
-      // Loop over all the rotation vectors (equivalent to rotating the kernel)
-      for(int i = 0; i < 4; ++i) {
-    
-        result = vec3(0.0, 0.0, 0.0);
+      float phase1_threshold = 0.4;      
 
-        vec2 du = rotation_du[i];    
-        vec2 dv = vec2(du.y, -du.x); // Obtain the perpendicular vector
+      int phase1_strongest_bin = -1; // -1 means no bin had a strong response
+      float phase1_strongest_response = 0.0;
 
-        //
-        // float sobel_kernel[9];
-        // sobel_kernel[0] = -1.0; sobel_kernel[1] = 0.0; sobel_kernel[2] = +1.0;
-        // sobel_kernel[3] = -1.5; sobel_kernel[4] = 0.0; sobel_kernel[5] = +1.5;
-        // sobel_kernel[6] = -1.0; sobel_kernel[7] = 0.0; sobel_kernel[8] = +1.0;
+      // Step 1 - first 12 bins to detect stronger response
 
-        // << Row 1 >>
+      for (int i = 0; i < 12; ++i) {
 
-        vec2 p1r = pass_TextureCoord + du - dv; // Texture texel to be multiplied with kernel position 2
-        vec2 p1l = pass_TextureCoord - du - dv; // ditto with ker pos 0
-
-        // Kernel is vertically oversampled on left/right
-        vec2 p2r = pass_TextureCoord + du - (2.0 * dv); // Texture texel on the top of position [2]
-        vec2 p2l = pass_TextureCoord - du - (2.0 * dv); // ditto on the top of 0
-
-        vec2 p3r = pass_TextureCoord + du - (3.0 * dv); // Texture texel on the top of position [2]
-        vec2 p3l = pass_TextureCoord - du - (3.0 * dv); // ditto on the top of 0
-
-        vec2 p4r = pass_TextureCoord + du - (4.0 * dv); // Texture texel on the top of position [2]
-        vec2 p4l = pass_TextureCoord - du - (4.0 * dv); // ditto on the top of 0
-
-        vec2 p5r = pass_TextureCoord + du - (5.0 * dv); // Texture texel on the top of position [2]
-        vec2 p5l = pass_TextureCoord - du - (5.0 * dv); // ditto on the top of 0
-
-        vec2 p6r = pass_TextureCoord + du - (6.0 * dv);
-        vec2 p6l = pass_TextureCoord - du - (6.0 * dv);   
-
-        vec2 p7r = pass_TextureCoord + du - (7.0 * dv);
-        vec2 p7l = pass_TextureCoord - du - (7.0 * dv);
+        vec2 du = rotation_du[5 * i]; // Grab one of the 12 primary vectors
+        vec2 dv = vec2(du.y, -du.x);  // Obtain the perpendicular vector
         
-        /*if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
-          // Bail out (the response will be 0.0 for this angle)
-          continue;
-        }*/
-        
-        vec4 p1r_rgba = texture2D(input_texture, p1r);
-        vec4 p1l_rgba = texture2D(input_texture, p1l);
-        vec4 p2r_rgba = texture2D(input_texture, p2r);
-        vec4 p2l_rgba = texture2D(input_texture, p2l);
-        vec4 p3r_rgba = texture2D(input_texture, p3r);
-        vec4 p3l_rgba = texture2D(input_texture, p3l);
-        vec4 p4r_rgba = texture2D(input_texture, p4r);
-        vec4 p4l_rgba = texture2D(input_texture, p4l);
-        vec4 p5r_rgba = texture2D(input_texture, p5r);
-        vec4 p5l_rgba = texture2D(input_texture, p5l);
-        vec4 p6r_rgba = texture2D(input_texture, p6r);
-        vec4 p6l_rgba = texture2D(input_texture, p6l);
-        vec4 p7r_rgba = texture2D(input_texture, p7r);
-        vec4 p7l_rgba = texture2D(input_texture, p7l);
+        float bin_response = calculateTotalKernelResponse(du, dv);
 
-        /*if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
-          // Bail out (the response will be 0.0 for this angle)
-          continue;
-        }*/
+        bin_response = applyThreshold(bin_response, phase1_threshold);
 
-        float alpha_factor = p1r_rgba.a * p1l_rgba.a * 
-                             p2r_rgba.a * p2l_rgba.a *
-                             p3r_rgba.a * p3l_rgba.a *
-                             p4r_rgba.a * p4l_rgba.a *
-                             p5r_rgba.a * p5l_rgba.a *
-                             p6r_rgba.a * p6l_rgba.a *
-                             p7r_rgba.a * p7l_rgba.a;
-
-        result += abs(p1r_rgba.xyz - p1l_rgba.xyz);
-        result += abs(p2r_rgba.xyz - p2l_rgba.xyz);
-        result += abs(p3r_rgba.xyz - p3l_rgba.xyz);
-        result += abs(p4r_rgba.xyz - p4l_rgba.xyz);
-        result += abs(p5r_rgba.xyz - p5l_rgba.xyz);
-        result += abs(p6r_rgba.xyz - p6l_rgba.xyz);
-        result += abs(p7r_rgba.xyz - p7l_rgba.xyz);
-
-        // << Row 2 >>
-
-        p1r = pass_TextureCoord + du; // Texture texel to be multiplied with kernel position 5
-        p1l = pass_TextureCoord - du; // ditto with ker pos 3
-        
-        /*if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
-          // Bail out (the response will be 0.0 for this angle)
-          continue;
-        }*/
-        
-        p1r_rgba = texture2D(input_texture, p1r);
-        p1l_rgba = texture2D(input_texture, p1l);
-        
-        /*if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
-          // Bail out (the response will be 0.0 for this angle)
-          continue;
-        }*/
-
-        alpha_factor *= p1r_rgba.a * p1l_rgba.a;
-        result += 1.5 * abs(p1r_rgba.xyz - p1l_rgba.xyz);
-
-        // << Row 3 >>
-
-        p1r = pass_TextureCoord + du + dv; // Texture texel to be multiplied with kernel position 8
-        p1l = pass_TextureCoord - du + dv; // ditto with ker pos 6
-
-        // Kernel is vertically oversampled on left/right
-        p2r = pass_TextureCoord + du + (2.0 * dv); // Texture texel on the bottom of position [2]
-        p2l = pass_TextureCoord - du + (2.0 * dv); // ditto on the bottom of [0]
-
-        p3r = pass_TextureCoord + du + (3.0 * dv); // Texture texel on the bottom of position [2]
-        p3l = pass_TextureCoord - du + (3.0 * dv); // ditto on the bottom of [0]
-
-        p4r = pass_TextureCoord + du + (4.0 * dv); // Texture texel on the bottom of position [2]
-        p4l = pass_TextureCoord - du + (4.0 * dv); // ditto on the bottom of [0]
-      
-        p5r = pass_TextureCoord + du + (5.0 * dv); // Texture texel on the bottom of position [2]
-        p5l = pass_TextureCoord - du + (5.0 * dv); // ditto on the bottom of [0]    
-
-        p6r = pass_TextureCoord + du + (6.0 * dv);
-        p6l = pass_TextureCoord - du + (6.0 * dv);
-
-        p7r = pass_TextureCoord + du + (7.0 * dv);
-        p7l = pass_TextureCoord - du + (7.0 * dv);
-
-
-        /*if(isOutOfTexture(p1) || isOutOfTexture(p2)) {
-          // Bail out (the response will be 0.0 for this angle)
-          continue;
-        }*/
-        
-        p1r_rgba = texture2D(input_texture, p1r);
-        p1l_rgba = texture2D(input_texture, p1l);
-        p2r_rgba = texture2D(input_texture, p2r);
-        p2l_rgba = texture2D(input_texture, p2l);
-        p3r_rgba = texture2D(input_texture, p3r);
-        p3l_rgba = texture2D(input_texture, p3l);
-        p4r_rgba = texture2D(input_texture, p4r);
-        p4l_rgba = texture2D(input_texture, p4l);
-        p5r_rgba = texture2D(input_texture, p5r);
-        p5l_rgba = texture2D(input_texture, p5l);
-        p6r_rgba = texture2D(input_texture, p6r);
-        p6l_rgba = texture2D(input_texture, p6l);
-        p7r_rgba = texture2D(input_texture, p7r);
-        p7l_rgba = texture2D(input_texture, p7l);
-        
-        /*if(isOnTextureBorder(p1_rgba) || isOnTextureBorder(p2_rgba)) {
-          // Bail out (the response will be 0.0 for this angle)
-          continue;
-        }*/
-
-        alpha_factor *=  p1r_rgba.a * p1l_rgba.a * 
-                         p2r_rgba.a * p2l_rgba.a *
-                         p3r_rgba.a * p3l_rgba.a *
-                         p4r_rgba.a * p4l_rgba.a *
-                         p5r_rgba.a * p5l_rgba.a *
-                         p6r_rgba.a * p6l_rgba.a *
-                         p7r_rgba.a * p7l_rgba.a;
-
-        result += abs(p1r_rgba.xyz - p1l_rgba.xyz);
-        result += abs(p2r_rgba.xyz - p2l_rgba.xyz);
-        result += abs(p3r_rgba.xyz - p3l_rgba.xyz);
-        result += abs(p4r_rgba.xyz - p4l_rgba.xyz);
-        result += abs(p5r_rgba.xyz - p5l_rgba.xyz);
-        result += abs(p6r_rgba.xyz - p6l_rgba.xyz);
-        result += abs(p7r_rgba.xyz - p7l_rgba.xyz);
-
-
-        // Apply the alpha factors (1.0 if everything is included into the
-        // computation, 0.0 if something triggered a no-compute for this kernel)
-        result *= alpha_factor;
-
-        // Sum all responses before thresholding and normalize it in the
-        // range [0.0;1.0] (max is 46.5)
-        float total_response = abs(result.x + result.y + result.z) / 46.5;
-
-        // Apply the appropriate response boost (e.g. 45° degrees must be boosted with
-        // respect to 0° degrees lines)
-        total_response *= response_boost[i];
-
-        // Finally store the final response for this angle
-        float threshold = 0.82;
-        if(i == 0) {
-          angle_responses[0] = applyThreshold(total_response, threshold); //< 0
-        } else if(i == 1) {
-          angle_responses[1] = applyThreshold(total_response, threshold);
-        } else if(i == 2) {
-          angle_responses[2] = applyThreshold(total_response, threshold); //< 90
-        } else if(i == 3) {
-          angle_responses[3] = applyThreshold(total_response, threshold);
+        // Detect if we had the strongest response for this bin
+        if (bin_response > phase1_strongest_response) {
+          phase1_strongest_response = bin_response;
+          phase1_strongest_bin = i;
         }
       }
 
-      gl_FragColor = angle_responses;
+      float phase2_threshold = 0.8;
+
+      int phase2_strongest_bin = -1; // -1 means no bin had a strong response
+      float phase2_strongest_response = 0.0;
+
+      // Step 2 - refine to detect fine-grained strongest response bin
+      
+      if (phase1_strongest_bin != -1) {
+
+        for (int i = -2; i <= 2; ++i) {
+          int sub_bin = (5 * phase1_strongest_bin) + i;
+
+          // Wrap around in the [0;60[ interval
+          if (sub_bin < 0)
+            sub_bin += 60;
+          sub_bin = sub_bin - ((sub_bin / 60) * 60); // No modulo in ES 2.0
+
+          vec2 du;
+          vec2 dv;
+          for(int i2=0; i2<60; ++i2){ // Wasteful stupid way to overcome ES 2.0
+                                      // limitations on accessing rotation_du[sub_bin]
+            if(i2 == sub_bin) {
+              du = rotation_du[i2]; // Grab refined secondary vector
+              dv = vec2(du.y, -du.x);    // Obtain the perpendicular vector
+              break;
+            }
+          }
+
+          float bin_response = calculateTotalKernelResponse(du, dv);
+
+          bin_response = applyThreshold(bin_response, phase2_threshold);
+
+          // Detect if we had the strongest response for this bin
+          if (bin_response > phase2_strongest_response) {
+            phase2_strongest_response = bin_response;
+            phase2_strongest_bin = sub_bin;
+          }
+        }
+
+        if (phase2_strongest_bin != -1) {
+          // Success - we had a strong response for one refined bin
+          response.x = 1.0;
+          response.y = (1.0 / 60.0) * float(phase2_strongest_bin);
+        }
+      }
+     
+      gl_FragColor = response;
     }
   </script>
 
   <!-- Reduction shader -->
   <script id="row-reduction-shader-fs" type="x-shader/x-fragment">
-    // Reduces a WxH texture data to a single Wx1 row (4 channels each pixel)
+    // Reduces a WxH texture data outputting 4 float values per 4 angles each time
+    // (with 60 angles this has to be called 15 times)
     precision highp float;
     
     uniform sampler2D input_texture;
@@ -386,23 +335,56 @@
 
     varying vec4 pass_Color; // Unused/for debugging purposes
     varying vec2 pass_TextureCoord;
+
+    // Deals with floating point imprecisions
+    bool isAboutEqual(float v1, float v2) {
+      return abs(v1 - v2) < 0.01;
+    }
+
+    vec4 packFloatToVec4i(const float value) {
+      const vec4 bitSh = vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0);
+      const vec4 bitMsk = vec4(0.0, 1.0/256.0, 1.0/256.0, 1.0/256.0);
+      vec4 res = fract(value * bitSh);
+      res -= res.xxyz * bitMsk;
+      return res;
+    }
+
+    float unpackFloatFromVec4i(const vec4 value) {
+      const vec4 bitSh = vec4(1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0);
+      return(dot(value, bitSh));
+    }
     
     void main(void) {
-      vec4 angles_result = vec4(0.0, 0.0, 0.0, 0.0);
 
-      float increment = 1.0 / input_texture_size.y;
+      float increment_x = 1.0 / input_texture_size.x;
+      float increment_y = 1.0 / input_texture_size.y;
 
-      for(float i = 0.0; i < 1024.0; i += 1.0) {
-        if(i > input_texture_size.y) // Another workaround for constant expressions
-          break;    
+      float pixels_count = 0.0;
 
-        angles_result += texture2D(input_texture, vec2(pass_TextureCoord.x, increment * i ));
+      for(float y = 0.0; y < 1024.0; y += 1.0) {
+        if(y > input_texture_size.y) // Another workaround for constant expressions
+          break;
+
+        for(float x = 0.0; x < 1024.0; x += 1.0) {
+          if(x > input_texture_size.x) // Another workaround for constant expressions
+            break;
+    
+          vec4 pixel_result = texture2D(input_texture, vec2(x * increment_x, y * increment_y));
+
+          if(isAboutEqual(pixel_result.x, 1.0)) {
+            // There was a response for this pixel, check if it's in our bin
+            float bin = pixel_result.y;
+            if(isAboutEqual(bin, pass_TextureCoord.x - increment_x))
+              pixels_count += 1.0;          
+          }
+        }
       }
 
-      gl_FragColor.x = angles_result.x / input_texture_size.y;
-      gl_FragColor.y = angles_result.y / input_texture_size.y;
-      gl_FragColor.z = angles_result.z / input_texture_size.y;
-      gl_FragColor.w = angles_result.w / input_texture_size.y;
+      // Normalize the values on the entire texture
+      pixels_count /= 512.0 * 512.0;
+
+      // First one is the percentage of pixels that responded to the filter
+      gl_FragColor = vec4(pixels_count, 0.0, 0.0, 0.0);
     }
     
   </script>
@@ -419,8 +401,15 @@
       } catch (e) {}
       if (!gl) {
         alert("Could not initialize WebGL");
+        return;
       }
    
+      var fptex_supported = gl.getExtension('OES_texture_float'); // Enable floating point textures
+      if (fptex_supported == null) {
+        alert("Floating point textures extension not supported");
+        return;
+      }
+
       setupQuad();
       initFramebuffer();
       initShaderPrograms();
@@ -458,9 +447,7 @@
     // Secondary framebuffers for intermediate computations and textures
     var renderFrameBuffer;
     var undistortionTexture;
-    var histogram_responses_0;
-    var histogram_responses_1;
-    var histogram_responses_2;
+    var histogram_responses;
     var histogram_reduced_row;
 
     // Utility function to get and compile a shader
@@ -581,7 +568,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.mvMatrixUniform = gl.getUniformLocation(histogramComputerShaderProgram, "uMVMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.texture_size = gl.getUniformLocation(histogramComputerShaderProgram, "input_texture_size"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.rotation_du = gl.getUniformLocation(histogramComputerShaderProgram, "rotation_du"));
-      ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.response_boost = gl.getUniformLocation(histogramComputerShaderProgram, "response_boost"));
+      // ctx = WebGLDebugUtils.makeDebugContext(histogramComputerShaderProgram.response_boost = gl.getUniformLocation(histogramComputerShaderProgram, "response_boost"));
 
       // ~-~-~-~-~-~-~- Init the histogram reduction shader program ~-~-~-~-~-~-~-
 
@@ -604,6 +591,7 @@
       ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.pMatrixUniform = gl.getUniformLocation(histogramReductionShaderProgram, "uPMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.mvMatrixUniform = gl.getUniformLocation(histogramReductionShaderProgram, "uMVMatrix"));
       ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.texture_size = gl.getUniformLocation(histogramReductionShaderProgram, "input_texture_size"));
+      ctx = WebGLDebugUtils.makeDebugContext(histogramReductionShaderProgram.response_part = gl.getUniformLocation(histogramReductionShaderProgram, "response_part"));
 
       // ~-~-~-~-~-~-~- Init the debug shader program ~-~-~-~-~-~-~-
 
@@ -672,8 +660,8 @@
         ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
         ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
         textureIsSafeToRender = true;
-      }      
-      textureId.image.src = "assets/pincushion_distortion_45_2.png";
+      }
+      textureId.image.src = "assets/pincushion_distortion.png";
       imageDimensions = new Float32Array([textureId.image.width, textureId.image.height]);
 
       // ~-~-~-~-~-~- Undistorted texture ~-~-~-~-~-~-
@@ -686,22 +674,16 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
 
       // ~-~-~-~-~-~- Histogram computing textures ~-~-~-~-~-~-
-      ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_0 = gl.createTexture());
-      ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_1 = gl.createTexture());
-      ctx = WebGLDebugUtils.makeDebugContext(histogram_responses_2 = gl.createTexture());
+      ctx = WebGLDebugUtils.makeDebugContext(histogram_responses = gl.createTexture());
       
       var setTextureSize = function () {
         ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
-                                               renderFrameBuffer.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
-        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
+                                               renderFrameBuffer.height, 0, gl.RGBA, gl.FLOAT, null));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+        ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
       }
 
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_0));
-      setTextureSize();
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_1));
-      setTextureSize();
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses_2));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses));
       setTextureSize();
 
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
@@ -709,10 +691,10 @@
       // ~-~-~-~-~-~- Reduction textures ~-~-~-~-~-~-
       ctx = WebGLDebugUtils.makeDebugContext(histogram_reduced_row = gl.createTexture());
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_reduced_row));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
-      // width x 1 output (one row)
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, renderFrameBuffer.width,
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
+      // 60 bins x 1 output (one row)
+      ctx = WebGLDebugUtils.makeDebugContext(gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 60, // 60 bins - one row is sufficient
                                              1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));
     }
@@ -774,7 +756,7 @@
 
     // Calculates histogram data. 'response_part' is the histogram part that
     // has to be calculated (see the fragment shader for more info)
-    function calculateHistogramDataInFramebuffer(response_part) {
+    function calculateHistogramDataInFramebuffer() {
       // Bind secondary framebuffer
       gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
 
@@ -796,9 +778,6 @@
       var texture_size = [512.0, 512.0];
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.texture_size, texture_size));
 
-      // Set the response part to be calculated
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(histogramComputerShaderProgram.response_part, response_part));
-
       // Bind texture to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, undistortionTexture));
@@ -809,18 +788,18 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1i(sampler2D_loc, 0));
 
       // Fill the angle increments for the histogram computer shader      
-      var vectors = new Float32Array(4 * 2); // 4 vec2 increments, (see fragment shader)
-      var angle_increment_degrees = 15.0;
-      for (i = response_part * 4; i < (response_part * 4) + 4; i++) {
+      var vectors = new Float32Array(12 * 5 * 2); // 60 vec2 increments, (see fragment shader)
+      var angle_increment_degrees = 3.0;
+      for (i = 0; i < 12 * 5; ++i) {
         var angle_radians = (i * angle_increment_degrees) / 180.0 * Math.PI;
 
-        vectors[(i - response_part * 4) * 2] = Math.cos(angle_radians) / 512.0;
-        vectors[(i - response_part * 4) * 2 + 1] = Math.sin(angle_radians) / 512.0;
+        vectors[i * 2] = Math.cos(angle_radians) / 512.0;
+        vectors[i * 2 + 1] = Math.sin(angle_radians) / 512.0;
       }
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramComputerShaderProgram.rotation_du, vectors));
 
       // Fill response boost
-      var response_boost = [0.0, 0.0, 0.0, 0.0];
+      /*var response_boost = [0.0, 0.0, 0.0, 0.0];
       switch(response_part) {
         case 0: {
           response_boost[0] = 1.0;
@@ -841,7 +820,7 @@
           response_boost[3] = 1.0;
         } break;
       }
-      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform4fv(histogramComputerShaderProgram.response_boost, response_boost));
+      // ctx = WebGLDebugUtils.makeDebugContext(gl.uniform4fv(histogramComputerShaderProgram.response_boost, response_boost)); */
 
       // Bind vertex data and set vertex attributes (as from a VAO)
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, vboId));
@@ -864,21 +843,20 @@
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
 
-    // Computes a reduction to one row for the histogram data. 'histogram_part' is
-    // the texture data (i.e. the texture containing part of the histogram).
-    // 'starting_angle' is the starting angle index in the hemisphere of rotation
-    // vectors
+    // Computes a reduction to one row for the histogram data. 'histogram_part' 
+    // is the part of the reduction to be computed (i.e. which 4-angles increment
+    // needs to be output)
     function histogramReductionInFramebuffer(histogram_part) {
       // Bind secondary framebuffer
       gl.bindFramebuffer(gl.FRAMEBUFFER, renderFrameBuffer);
 
       // Resize secondary framebuffer depth buffer to accommodate for the Wx1 output texture
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderFrameBuffer.renderBuffer));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, renderFrameBuffer.width, 1));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, 60, 1));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
 
-      // Sets only one row of pixels to be computed
-      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 512, 1));
+      // Sets only one row of bins to be computed
+      ctx = WebGLDebugUtils.makeDebugContext(gl.viewport(0, 0, 60, 1));
       ctx = WebGLDebugUtils.makeDebugContext(gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT));
 
       // Set up histogram reduction shader program
@@ -891,13 +869,16 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.pMatrixUniform, false, pMatrix));
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniformMatrix4fv(histogramReductionShaderProgram.mvMatrixUniform, false, mvMatrix));
 
-      // Set texture size uniforms
+      // Set input texture size uniforms
       var texture_size = [512.0, 512.0];
       ctx = WebGLDebugUtils.makeDebugContext(gl.uniform2fv(histogramReductionShaderProgram.texture_size, texture_size));
 
+      // Set reduction part
+      ctx = WebGLDebugUtils.makeDebugContext(gl.uniform1f(histogramReductionShaderProgram.response_part, histogram_part));
+
       // Bind the right texture input to texture unit 0
       ctx = WebGLDebugUtils.makeDebugContext(gl.activeTexture(gl.TEXTURE0));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_part));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, histogram_responses));
       // Since these are data textures, in order to facilitate lookup set nearest filters
       ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST));
       ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST));
@@ -917,8 +898,6 @@
       ctx = WebGLDebugUtils.makeDebugContext(gl.drawElements(gl.TRIANGLES, indices_count, gl.UNSIGNED_SHORT, 0));
 
       // Cleanup
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindBuffer(gl.ARRAY_BUFFER, null));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindTexture(gl.TEXTURE_2D, null));      
@@ -942,31 +921,20 @@
       var renderbuffer;
       ctx = WebGLDebugUtils.makeDebugContext(renderbuffer = gl.createRenderbuffer());
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer));
-      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, 512, 1));
+      ctx = WebGLDebugUtils.makeDebugContext(gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, 60, 1));
       framebuffer.renderBuffer = renderbuffer;
       ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, renderbuffer));
       ctx = WebGLDebugUtils.makeDebugContext(gl.bindRenderbuffer(gl.RENDERBUFFER, null));
 
       ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
       // Read the contents of the texture from the framebuffer
-      var data_uint8 = new Uint8Array(512 * 1 * 4); // 512 x 1 normalized floats times 4 angles
-      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, 512, 1, gl.RGBA, gl.UNSIGNED_BYTE, data_uint8));
-      var result_angles = new Float32Array(4);
-      result_angles[0] = 0.0;
-      result_angles[1] = 0.0;
-      result_angles[2] = 0.0;
-      result_angles[3] = 0.0;
-      // Reduce data
-      for (i = 0; i < 512; ++i) {
-        result_angles[0] += (data_uint8[i * 4]) / 255.0;
-        result_angles[1] += (data_uint8[i * 4 + 1]) / 255.0;
-        result_angles[2] += (data_uint8[i * 4 + 2]) / 255.0;
-        result_angles[3] += (data_uint8[i * 4 + 3]) / 255.0;
+      var data_uint8 = new Uint8Array(60 * 1 * 4); // 60 bin responses, each one packed into 4 8-bit components
+      ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, 60, 1, gl.RGBA, gl.UNSIGNED_BYTE, data_uint8));
+      var result_angles = new Float32Array(60);
+
+      for (var i = 0; i < 60; ++i) {
+        result_angles[i] = data_uint8[i * 4] / 256.0;
       }
-      result_angles[0] /= 512.0;
-      result_angles[1] /= 512.0;
-      result_angles[2] /= 512.0;
-      result_angles[3] /= 512.0;
       ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
       return result_angles;
     }
@@ -981,107 +949,111 @@
       renderUndistortedInFramebuffer();
 
       // Render and calculate all the histogram responses
-      attachTextureToFrameBuffer(histogram_responses_0);
-      calculateHistogramDataInFramebuffer(0);
+      attachTextureToFrameBuffer(histogram_responses);
+      calculateHistogramDataInFramebuffer();
 
-      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
-      var framebuffer;
-      var width = 512.0;
-      var height = 512.0;
-      ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());                  
-      saveTextureDataToArray = function (texture, array) {
-        ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
-        ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
-        // Read the contents of the framebuffer
-        var data = new Uint8Array(width * height * 4);
-        ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data));
-        // Flip webgl data (usually Y-inverse stored)
-        for (y = 0; y < height; ++y) {
-          for (x = 0; x < width; ++x) {
-            array[y * width * 4 + x * 4]     = data[(height - 1 - y) * width * 4 + x * 4];
-            array[y * width * 4 + x * 4 + 1] = data[(height - 1 - y) * width * 4 + x * 4 + 1];
-            array[y * width * 4 + x * 4 + 2] = data[(height - 1 - y) * width * 4 + x * 4 + 2];
-            array[y * width * 4 + x * 4 + 3] = data[(height - 1 - y) * width * 4 + x * 4 + 3];
-          }
-        }
-        ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, null));
-      }
-      var texture0_data = new Uint8Array(width * height * 4);
-      saveTextureDataToArray(histogram_responses_0, texture0_data);
-      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      //// DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      //var framebuffer;
+      //var width = 512.0;
+      //var height = 512.0;
+      //ctx = WebGLDebugUtils.makeDebugContext(framebuffer = gl.createFramebuffer());                  
+      //saveTextureDataToArray = function (texture, array) {
+      //  ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer));
+      //  ctx = WebGLDebugUtils.makeDebugContext(gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0));
+      //  // Read the contents of the framebuffer
+      //  var data = new Uint8Array(width * height * 4);
+      //  ctx = WebGLDebugUtils.makeDebugContext(gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data));
+      //  // Flip webgl data (usually Y-inverse stored)
+      //  for (y = 0; y < height; ++y) {
+      //    for (x = 0; x < width; ++x) {
+      //      array[y * width * 4 + x * 4]     = data[(height - 1 - y) * width * 4 + x * 4];
+      //      array[y * width * 4 + x * 4 + 1] = data[(height - 1 - y) * width * 4 + x * 4 + 1];
+      //      array[y * width * 4 + x * 4 + 2] = data[(height - 1 - y) * width * 4 + x * 4 + 2];
+      //      array[y * width * 4 + x * 4 + 3] = data[(height - 1 - y) * width * 4 + x * 4 + 3];
+      //    }
+      //  }
+      //  ctx = WebGLDebugUtils.makeDebugContext(gl.bindFramebuffer(gl.FRAMEBUFFER, null));
+      //}
+      //var texture0_data = new Uint8Array(width * height * 4);
+      //saveTextureDataToArray(histogram_responses_0, texture0_data);
+      //// DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
 
-      attachTextureToFrameBuffer(histogram_responses_1);
-      calculateHistogramDataInFramebuffer(1);
+      //attachTextureToFrameBuffer(histogram_responses_1);
+      //calculateHistogramDataInFramebuffer(1);
 
-      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
-      var texture1_data = new Uint8Array(width * height * 4);
-      saveTextureDataToArray(histogram_responses_1, texture1_data);
-      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      //// DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      //var texture1_data = new Uint8Array(width * height * 4);
+      //saveTextureDataToArray(histogram_responses_1, texture1_data);
+      //// DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
 
-      attachTextureToFrameBuffer(histogram_responses_2);
-      calculateHistogramDataInFramebuffer(2);
+      //attachTextureToFrameBuffer(histogram_responses_2);
+      //calculateHistogramDataInFramebuffer(2);
 
-      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
-      var texture2_data = new Uint8Array(width * height * 4);
-      saveTextureDataToArray(histogram_responses_2, texture2_data);
+      //// DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      //var texture2_data = new Uint8Array(width * height * 4);
+      //saveTextureDataToArray(histogram_responses_2, texture2_data);
 
-      outputVisualFeedback = function () {        
-        // Only retain angles data
-        var final_data = new Uint8Array(width * height * 4);
-        for (y = 0; y < height; ++y) {
-          for (x = 0; x < width; ++x) {
-            var this_index = y * width * 4 + x * 4;
-            var max_uninteresting_angles = Math.max(/* 0 not here, */texture0_data[this_index + 1], texture0_data[this_index + 2],
-              texture0_data[this_index + 3], texture1_data[this_index], texture1_data[this_index + 1], /* 0 not here, */
-              texture1_data[this_index + 3], texture2_data[this_index], texture2_data[this_index + 1],
-              texture2_data[this_index + 2], texture2_data[this_index + 3], 0);
-            if (max_uninteresting_angles > 0) {
-              final_data[this_index] = max_uninteresting_angles; // Red
-              final_data[this_index + 1] = 0;
-              final_data[this_index + 2] = 0;
-              final_data[this_index + 3] = 255;
-            } else {
-              var max_interesting_angles = Math.max(texture0_data[this_index], texture1_data[this_index + 2], 0);
-              final_data[this_index] = 0; 
-              final_data[this_index + 1] = max_interesting_angles; // Green
-              final_data[this_index + 2] = 0;
-              final_data[this_index + 3] = 255;
-            }
-          }
-        }        
-        // Create a 2D canvas to store the result 
-        var canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        var context = canvas.getContext('2d');
-        // Copy the pixels to a 2D canvas
-        var imageData = context.createImageData(width, height);
-        imageData.data.set(final_data);
-        context.putImageData(imageData, 0, 0);
-        return canvas.toDataURL();
-      }
+      //outputVisualFeedback = function () {        
+      //  // Only retain angles data
+      //  var final_data = new Uint8Array(width * height * 4);
+      //  for (y = 0; y < height; ++y) {
+      //    for (x = 0; x < width; ++x) {
+      //      var this_index = y * width * 4 + x * 4;
+      //      var max_uninteresting_angles = Math.max(/* 0 not here, */texture0_data[this_index + 1], texture0_data[this_index + 2],
+      //        texture0_data[this_index + 3], texture1_data[this_index], texture1_data[this_index + 1], /* 0 not here, */
+      //        texture1_data[this_index + 3], texture2_data[this_index], texture2_data[this_index + 1],
+      //        texture2_data[this_index + 2], texture2_data[this_index + 3], 0);
+      //      if (max_uninteresting_angles > 0) {
+      //        final_data[this_index] = max_uninteresting_angles; // Red
+      //        final_data[this_index + 1] = 0;
+      //        final_data[this_index + 2] = 0;
+      //        final_data[this_index + 3] = 255;
+      //      } else {
+      //        var max_interesting_angles = Math.max(texture0_data[this_index], texture1_data[this_index + 2], 0);
+      //        final_data[this_index] = 0; 
+      //        final_data[this_index + 1] = max_interesting_angles; // Green
+      //        final_data[this_index + 2] = 0;
+      //        final_data[this_index + 3] = 255;
+      //      }
+      //    }
+      //  }        
+      //  // Create a 2D canvas to store the result 
+      //  var canvas = document.createElement('canvas');
+      //  canvas.width = width;
+      //  canvas.height = height;
+      //  var context = canvas.getContext('2d');
+      //  // Copy the pixels to a 2D canvas
+      //  var imageData = context.createImageData(width, height);
+      //  imageData.data.set(final_data);
+      //  context.putImageData(imageData, 0, 0);
+      //  return canvas.toDataURL();
+      //}
 
-      var img = document.getElementById("debug-img");
-      img.src = outputVisualFeedback();
-      ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
-      // DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
+      //var img = document.getElementById("debug-img");
+      //img.src = outputVisualFeedback();
+      //ctx = WebGLDebugUtils.makeDebugContext(gl.deleteFramebuffer(framebuffer));
+      //// DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG DEBUG
 
 
       
 
       // Now reduce all the responses
       attachTextureToFrameBuffer(histogram_reduced_row); // Output into this
+      
+      var histogram = [];
+      for(var i = 0.0; i < 15.0; i += 1.0) { // 15 4-angles-each intervals
+        histogramReductionInFramebuffer(i);
+        var histogram_part = getComponentsFromReducedTexture(histogram_reduced_row);
+        Array.prototype.push.apply(histogram, histogram_part);
+      }
 
-      histogramReductionInFramebuffer(histogram_responses_0);
-      var histogram_part0 = getComponentsFromReducedTexture(histogram_reduced_row);
+      //histogramReductionInFramebuffer(histogram_responses_1);
+      //var histogram_part1 = getComponentsFromReducedTexture(histogram_reduced_row);
 
-      histogramReductionInFramebuffer(histogram_responses_1);
-      var histogram_part1 = getComponentsFromReducedTexture(histogram_reduced_row);
+      //histogramReductionInFramebuffer(histogram_responses_2);
+      //var histogram_part2 = getComponentsFromReducedTexture(histogram_reduced_row);
 
-      histogramReductionInFramebuffer(histogram_responses_2);
-      var histogram_part2 = getComponentsFromReducedTexture(histogram_reduced_row);
-
-      console.log("Reduction done\n");
+      //console.log("Reduction done\n");
 
       
       // Debug
@@ -1119,10 +1091,6 @@
 
 
       // Return complete histogram
-      var histogram = [];
-      Array.prototype.push.apply(histogram, histogram_part0);
-      Array.prototype.push.apply(histogram, histogram_part1);
-      Array.prototype.push.apply(histogram, histogram_part2);
 
       // Scale up these values to indicate how many pixels responded to a given angle
       for (var i = 0; i < histogram.length; ++i) {
@@ -1130,19 +1098,13 @@
       }
 
       var ptag = document.getElementById("debug-paragraph");
-      ptag.innerText =
-        "0°(" + histogram[0] + ") " +
-        "15°(" + histogram[1] + ") " +
-        "30°(" + histogram[2] + ") " +
-        "45°(" + histogram[3] + ") " +
-        "60°(" + histogram[4] + ") " +
-        "75°(" + histogram[5] + ") " +
-        "90°(" + histogram[6] + ") " +
-        "105°(" + histogram[7] + ") " +
-        "120°(" + histogram[8] + ") " +
-        "135°(" + histogram[9] + ") " +
-        "150°(" + histogram[10] + ") " +
-        "165°(" + histogram[11] + ") ";
+      var text = "";
+      var angle = 0;
+      for(var i = 0; i < 60; ++i) {
+        text += angle + "°[" + histogram[i] + "]\n";
+        angle += 3;
+      }
+      ptag.innerText = text;
 
       return histogram;
     }
