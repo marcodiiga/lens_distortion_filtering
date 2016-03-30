@@ -1,3 +1,4 @@
-Radial lens undistortion filter in WebGL.
+Radial lens undistortion filter in WebGL
+======
 
-See it live [here](http://marcodiiga.github.io/lens_distortion_filtering/)
+For more information refer to [this post](http://marcodiiga.github.io/automatic-camera-calibration)
